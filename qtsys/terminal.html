@@ -165,6 +165,13 @@ tr.rowlink:hover{background:var(--panel2)}
 .btn.primary:hover{filter:brightness(1.1)}
 .btn.danger{border-color:var(--dn);color:var(--dn)}
 .btn.tiny{padding:4px 9px;font-size:10px}
+.btn.tiny.on{background:var(--amber);color:#000;font-weight:700;border-color:var(--amber)}
+.pbox{display:flex;flex-wrap:wrap;gap:6px 14px;padding:8px 12px;font-size:10.5px;
+  color:var(--mut2);border-top:1px dashed var(--line);align-items:center}
+.pgrp{display:inline-flex;align-items:center;gap:5px;color:#8b93a7;font-weight:700}
+.pf{display:inline-flex;align-items:center;gap:3px;color:var(--mut);font-weight:400}
+.pf input{width:46px;padding:2px 4px;font-size:10.5px;background:var(--bg0);
+  border:1px solid var(--line2);border-radius:3px;color:var(--fg);text-align:center}
 .seg{display:flex;border:1px solid var(--line2);border-radius:4px;overflow:hidden}
 .seg button{padding:6px 12px;font-size:11px;color:var(--mut)}
 .seg button.on{background:var(--amber);color:#000;font-weight:700}
@@ -325,15 +332,21 @@ const LIMITS={max_order_notional:60000,max_position_notional:120000,max_gross_le
 /* ============================================================ state */
 const S={
  mode:"demo", page:"markets", sym:null, tf:380, showSMA:true,
- ind:{bb:false,ema:false,rsi:false,macd:false},
+ ind:{bb:false,ema:false,rsi:false,macd:false,vwap:false,atr:false,stoch:false},
+ gran:"1D",                 // chart granularity: 1D | 1H | 15Min | 5Min | 1Min
+ showParams:false,
+ p:{smaF:20,smaS:100,ema:21,bbN:20,bbK:2,rsi:14,macdF:12,macdS:26,macdSig:9,
+    atrN:14,atrK:2,stK:14,stD:3,stSm:3,vwapWin:0},
  quotes:{},                 // sym -> {last, prevClose, spark[]}
- bars:{},                   // sym -> [{t,o,h,l,c,v}]
+ bars:{}, ibars:{},         // sym -> [{t,o,h,l,c,v}] ; ibars = intraday cache
  positions:[], orders:[], fills:[],
  account:{equity:0,cash:0,buying_power:0,day_pnl:0,total_pnl:0,gross_exposure:0,net_exposure:0,leverage:0,drawdown:0},
  halted:false, peak:0,
  agents:{master:true,list:[]}, alog:[],
  news:[], ticket:{side:"buy",type:"market"},
 };
+try{Object.assign(S.p,JSON.parse(localStorage.getItem("qtsys_params")||"{}"))}catch(e){}
+const saveParams=()=>{try{localStorage.setItem("qtsys_params",JSON.stringify(S.p))}catch(e){}};
 
 /* ============================================= real replay engine */
 /* every price below is REAL recorded market history (bundled public datasets:
@@ -573,6 +586,30 @@ function macdArr(cs,f=12,sl=26,sig=9){const ef=emaArr(cs,f),es=emaArr(cs,sl);
   const signal=sigRaw.map((v,i)=>macd[i]==null?null:v);
   const hist=macd.map((v,i)=>(v!=null&&signal[i]!=null)?v-signal[i]:null);
   return{macd,signal,hist}}
+function atrSeries(bars,n=14){const tr=bars.map((b,i)=>i===0?b.h-b.l:
+    Math.max(b.h-b.l,Math.abs(b.h-bars[i-1].c),Math.abs(b.l-bars[i-1].c)));
+  const out=Array(bars.length).fill(null);if(bars.length<=n)return out;
+  let a=tr.slice(1,n+1).reduce((x,y)=>x+y,0)/n;out[n]=a;
+  for(let i=n+1;i<bars.length;i++){a=(a*(n-1)+tr[i])/n;out[i]=a}return out}
+function atrBands(bars,n=14,k=2){const cs=bars.map(b=>b.c),mid=smaArr(cs,n),at=atrSeries(bars,n);
+  const up=mid.map((m,i)=>(m!=null&&at[i]!=null)?m+k*at[i]:null);
+  const lo=mid.map((m,i)=>(m!=null&&at[i]!=null)?m-k*at[i]:null);return{mid,up,lo}}
+function stochArr(bars,k=14,d=3,sm=3){const raw=Array(bars.length).fill(null);
+  for(let i=k-1;i<bars.length;i++){let hi=-1e18,lo=1e18;
+    for(let j=i-k+1;j<=i;j++){if(bars[j].h>hi)hi=bars[j].h;if(bars[j].l<lo)lo=bars[j].l}
+    raw[i]=hi===lo?50:100*(bars[i].c-lo)/(hi-lo)}
+  const K=smaArr(raw.map(v=>v==null?0:v),sm).map((v,i)=>raw[i]==null?null:v);
+  const D=smaArr(K.map(v=>v==null?0:v),d).map((v,i)=>K[i]==null?null:v);return{K,D}}
+function vwapArr(bars,win=0){const out=Array(bars.length).fill(null);
+  const tp=bars.map(b=>(b.h+b.l+b.c)/3);
+  if(win>0){let pv=0,vv=0,q=[];for(let i=0;i<bars.length;i++){const v=bars[i].v||1;
+      pv+=tp[i]*v;vv+=v;q.push({p:tp[i]*v,v});if(q.length>win){const o=q.shift();pv-=o.p;vv-=o.v}
+      out[i]=vv?pv/vv:tp[i]}return out}
+  // session-anchored: reset when the calendar day changes (for intraday bars)
+  let pv=0,vv=0,day=null;
+  for(let i=0;i<bars.length;i++){const d=(bars[i].t||"").slice(0,10);
+    if(d!==day){day=d;pv=0;vv=0}const v=bars[i].v||1;pv+=tp[i]*v;vv+=v;out[i]=vv?pv/vv:tp[i]}
+  return out}
 function agentRead(sym){
   const bars=S.bars[sym];if(!bars||bars.length<120)return null;
   const cs=bars.map(b=>b.c),s20=smaArr(cs,20),s100=smaArr(cs,100);
@@ -601,12 +638,55 @@ function drawSpark(cv,data,pos){
     py=h-2-((v-mn)/sp)*(h-4);i?x.lineTo(px,py):x.moveTo(px,py)});
   x.strokeStyle=pos?"#27d17f":"#ff5063";x.lineWidth=1.4;x.stroke();
 }
+function paramEditor(){
+  const P=S.p,rows=[];
+  const inp=(k,lbl,step=1,min=1)=>`<label class="pf">${lbl}<input type="number" data-p="${k}" value="${P[k]}" step="${step}" min="${min}"></label>`;
+  if(S.showSMA)rows.push("SMA "+inp("smaF","fast")+inp("smaS","slow"));
+  if(S.ind.ema)rows.push("EMA "+inp("ema","len"));
+  if(S.ind.bb)rows.push("BB "+inp("bbN","len")+inp("bbK","σ×",0.5,0.5));
+  if(S.ind.atr)rows.push("ATR "+inp("atrN","len")+inp("atrK","mult",0.5,0.5));
+  if(S.ind.vwap)rows.push("VWAP "+inp("vwapWin","win 0=sess",1,0));
+  if(S.ind.rsi)rows.push("RSI "+inp("rsi","len"));
+  if(S.ind.macd)rows.push("MACD "+inp("macdF","fast")+inp("macdS","slow")+inp("macdSig","sig"));
+  if(S.ind.stoch)rows.push("STOCH "+inp("stK","%K")+inp("stD","%D")+inp("stSm","smooth"));
+  return rows.length?rows.map(r=>`<span class="pgrp">${r}</span>`).join(""):
+    "<span class='mut'>enable an indicator, then edit its periods here</span>";
+}
+async function setGran(g){
+  S.gran=g;
+  if(g!=="1D"){
+    try{const h=await j(`/api/history/${encodeURIComponent(S.sym)}?tf=${g}&bars=520`);
+      S.ibars[S.sym]=h.bars;S._itfTs=Date.now();
+    }catch(e){toast(e.detail||(S.sym+": intraday unavailable on this venue"),"err");S.gran="1D";}
+  }
+  render();
+}
+async function fastTick(){
+  if(S.mode!=="live"||S.page!=="security"||!S.sym)return;
+  const s=S.sym;
+  // second-by-second last trade for the symbol being watched
+  try{const r=await j("/api/quote?sym="+encodeURIComponent(s));
+    if(r&&r.last){const q=S.quotes[s]||{};q.last=r.last;S.quotes[s]=q;
+      const arr=S.gran==="1D"?S.bars[s]:S.ibars[s];
+      if(arr&&arr.length){const b=arr[arr.length-1];b.c=r.last;
+        if(r.last>b.h)b.h=r.last;if(r.last<b.l)b.l=r.last;}
+      if(document.activeElement.tagName!=="INPUT"){drawChart(s);
+        const el=document.querySelector(".bigpx");if(el)el.textContent=fmt(r.last,pxd(s));}}
+  }catch(e){}
+  // pull fresh intraday bars every ~20s so new minute/hour candles appear
+  if(S.gran!=="1D"&&(!S._itfTs||Date.now()-S._itfTs>20000)){S._itfTs=Date.now();
+    j(`/api/history/${encodeURIComponent(s)}?tf=${S.gran}&bars=520`).then(h=>{
+      if(h&&h.bars){S.ibars[s]=h.bars;if(S.page==="security")drawChart(s)}}).catch(()=>{});}
+}
 let CH=null;
 function drawChart(sym){
   const cv=$("#chart");if(!cv)return;
-  const all=S.bars[sym]||[];const bars=all.slice(-S.tf);if(bars.length<5)return;
+  const all=(S.gran==="1D"?S.bars[sym]:S.ibars[sym])||[];
+  const bars=all.slice(-S.tf);if(bars.length<5)return;
   const cs=bars.map(b=>b.c);
-  const I=S.ind,panes=[];if(I.rsi)panes.push("rsi");if(I.macd)panes.push("macd");
+  const I=S.ind,P=S.p,panes=[];
+  if(I.rsi)panes.push("rsi");if(I.macd)panes.push("macd");if(I.stoch)panes.push("stoch");
+  const intraday=S.gran!=="1D";
   const dpr=devicePixelRatio||1,w=cv.clientWidth;
   const padR=58,padB=44,padT=8,vh=30,paneH=84,paneGap=8;
   const priceH=Math.max(230,Math.min(360,innerHeight*0.38));
@@ -630,25 +710,28 @@ function drawChart(sym){
   for(let g=0;g<=4;g++){const v=lo+sp*g/4,y=Y(v);
     x.beginPath();x.moveTo(0,y);x.lineTo(cw,y);x.stroke();
     x.fillText(fmt(v,pxd(sym)),cw+6,y+3)}
-  // date ticks
+  // date ticks (show time for intraday, date for daily)
   x.textAlign="center";
   for(let g=0;g<=4;g++){const i=Math.min(bars.length-1,Math.round(g/4*(bars.length-1)));
-    x.fillText(bars[i].t.slice(2),X(i),h-padB+16)}
+    const t=bars[i].t||"";x.fillText(intraday?(t.length>10?t.slice(5):t):t.slice(2),X(i),h-padB+16)}
   // volume (bottom of price panel)
   bars.forEach((b,i)=>{const vhpx=vmax>0?((b.v||0)/vmax)*vh:0;
     x.fillStyle=b.c>=b.o?"rgba(39,209,127,.28)":"rgba(255,80,99,.28)";
     x.fillRect(X(i)-bw/2,padT+priceH-vhpx,bw,vhpx)});
-  // Bollinger band fill (behind candles)
-  if(I.bb){const bb=bollArr(cs,20,2);poly(bb.up,"rgba(120,180,255,.55)",1);
+  // band overlays behind candles
+  if(I.bb){const bb=bollArr(cs,P.bbN,P.bbK);poly(bb.up,"rgba(120,180,255,.55)",1);
     poly(bb.lo,"rgba(120,180,255,.55)",1);poly(bb.mid,"rgba(120,180,255,.30)",1);}
+  if(I.atr){const ab=atrBands(bars,P.atrN,P.atrK);poly(ab.up,"rgba(255,140,60,.6)",1);
+    poly(ab.lo,"rgba(255,140,60,.6)",1);poly(ab.mid,"rgba(255,140,60,.30)",1);}
   // candles
   bars.forEach((b,i)=>{const up=b.c>=b.o,col=up?"#27d17f":"#ff5063";
     x.strokeStyle=col;x.beginPath();x.moveTo(X(i),Y(b.h));x.lineTo(X(i),Y(b.l));x.stroke();
     x.fillStyle=col;const y1=Y(Math.max(b.o,b.c)),y2=Y(Math.min(b.o,b.c));
     x.fillRect(X(i)-bw/2,y1,bw,Math.max(1,y2-y1))});
-  // moving-average overlays
-  if(S.showSMA){poly(smaArr(cs,20),"#58a6ff");poly(smaArr(cs,100),"#ffb200");}
-  if(I.ema){poly(emaArr(cs,21),"#c792ea");}
+  // line overlays
+  if(S.showSMA){poly(smaArr(cs,P.smaF),"#58a6ff");poly(smaArr(cs,P.smaS),"#ffb200");}
+  if(I.ema){poly(emaArr(cs,P.ema),"#c792ea");}
+  if(I.vwap){poly(vwapArr(bars,P.vwapWin),"#ffd166",1.4);}
   // last price line
   const last=bars[bars.length-1].c;x.strokeStyle="rgba(255,178,0,.6)";x.setLineDash([4,4]);
   x.beginPath();x.moveTo(0,Y(last));x.lineTo(cw,Y(last));x.stroke();x.setLineDash([]);
@@ -658,20 +741,28 @@ function drawChart(sym){
   panes.forEach(p=>{
     x.strokeStyle="#151d28";x.beginPath();x.moveTo(0,oy-4);x.lineTo(cw,oy-4);x.stroke();
     if(p==="rsi"){
-      const r=rsiArr(cs,14),YR=v=>oy+(1-v/100)*paneH;
+      const r=rsiArr(cs,P.rsi),YR=v=>oy+(1-v/100)*paneH;
       [30,50,70].forEach(g=>{x.strokeStyle="#1a2230";x.setLineDash(g===50?[]:[3,3]);
         x.beginPath();x.moveTo(0,YR(g));x.lineTo(cw,YR(g));x.stroke();x.setLineDash([]);
         x.fillStyle="#5b6579";x.textAlign="left";x.fillText(g,cw+6,YR(g)+3)});
       poly(r,"#c792ea",1.3,YR);
-      x.fillStyle="#8b93a7";x.fillText("RSI 14",4,oy+11);
+      x.fillStyle="#8b93a7";x.fillText("RSI "+P.rsi,4,oy+11);
+    } else if(p==="stoch"){
+      const S2=stochArr(bars,P.stK,P.stD,P.stSm),YS=v=>oy+(1-v/100)*paneH;
+      [20,50,80].forEach(g=>{x.strokeStyle="#1a2230";x.setLineDash(g===50?[]:[3,3]);
+        x.beginPath();x.moveTo(0,YS(g));x.lineTo(cw,YS(g));x.stroke();x.setLineDash([]);
+        x.fillStyle="#5b6579";x.textAlign="left";x.fillText(g,cw+6,YS(g)+3)});
+      poly(S2.K,"#58a6ff",1.3,YS);poly(S2.D,"#ff8c3c",1.2,YS);
+      x.fillStyle="#8b93a7";x.fillText(`STOCH ${P.stK},${P.stD},${P.stSm}`,4,oy+11);
     } else {
-      const M=macdArr(cs);const mx=Math.max(1e-9,...[...M.macd,...M.signal].filter(v=>v!=null).map(Math.abs));
+      const M=macdArr(cs,P.macdF,P.macdS,P.macdSig);
+      const mx=Math.max(1e-9,...[...M.macd,...M.signal].filter(v=>v!=null).map(Math.abs));
       const YM=v=>oy+paneH/2-(v/mx)*(paneH/2-4);
       x.strokeStyle="#1a2230";x.beginPath();x.moveTo(0,YM(0));x.lineTo(cw,YM(0));x.stroke();
       M.hist.forEach((v,i)=>{if(v==null)return;x.fillStyle=v>=0?"rgba(39,209,127,.5)":"rgba(255,80,99,.5)";
         const y0=YM(0),y1=YM(v);x.fillRect(X(i)-bw/2,Math.min(y0,y1),bw,Math.max(1,Math.abs(y1-y0)))});
       poly(M.macd,"#58a6ff",1.3,YM);poly(M.signal,"#ffb200",1.3,YM);
-      x.fillStyle="#8b93a7";x.textAlign="left";x.fillText("MACD 12,26,9",4,oy+11);
+      x.fillStyle="#8b93a7";x.textAlign="left";x.fillText(`MACD ${P.macdF},${P.macdS},${P.macdSig}`,4,oy+11);
     }
     oy+=paneH+paneGap;
   });
@@ -803,12 +894,19 @@ function vSecurity(){
     <span class="num ${cls(ch)}" style="font-size:15px">${pct(ch)} today</span></div>
 
   <div class="panel"><div class="ph">Price · GP
-    <span class="right"><span class="seg" id="tfseg">
-      ${[["65","3M"],["130","6M"],["252","1Y"],["380","ALL"]].map(([v,l])=>
+    <span class="right">
+      <span class="seg" id="granseg">${[["1D","D"],["1H","1H"],["15Min","15m"],["5Min","5m"],["1Min","1m"]].map(([v,l])=>
+        `<button data-gran="${v}" class="${S.gran===v?"on":""}">${l}</button>`).join("")}</span>
+      <span class="seg" id="tfseg">${[["120","120"],["260","260"],["520","520"],["9999","MAX"]].map(([v,l])=>
         `<button data-tf="${v}" class="${S.tf==+v?"on":""}">${l}</button>`).join("")}</span>
-      <button class="btn tiny" data-ind="sma">${S.showSMA?"SMA ✓":"SMA"}</button><button class="btn tiny" data-ind="ema">${S.ind.ema?"EMA ✓":"EMA"}</button><button class="btn tiny" data-ind="bb">${S.ind.bb?"BB ✓":"BB"}</button><button class="btn tiny" data-ind="rsi">${S.ind.rsi?"RSI ✓":"RSI"}</button><button class="btn tiny" data-ind="macd">${S.ind.macd?"MACD ✓":"MACD"}</button></span></div>
+      ${[["sma","SMA",S.showSMA],["ema","EMA",S.ind.ema],["bb","BB",S.ind.bb],["vwap","VWAP",S.ind.vwap],["atr","ATR",S.ind.atr],["rsi","RSI",S.ind.rsi],["macd","MACD",S.ind.macd],["stoch","STOCH",S.ind.stoch]].map(([k,l,on])=>
+        `<button class="btn tiny${on?" on":""}" data-ind="${k}">${l}${on?" ✓":""}</button>`).join("")}
+      <button class="btn tiny${S.showParams?" on":""}" id="parambtn" title="edit indicator parameters">⚙</button></span></div>
+    ${S.showParams?`<div class="pbox">${paramEditor()}</div>`:""}
     <div id="chartwrap"><canvas id="chart"></canvas><div id="xhair"></div></div>
-    <div class="note"><span style="color:#58a6ff">■</span> SMA20 · <span style="color:#ffb200">■</span> SMA100 · <span style="color:#c792ea">■</span> EMA21/RSI · <span style="color:#58a6ff">■</span> Bollinger(20,2) · MACD(12,26,9) — toggle above · drag/hover for OHLC</div></div>
+    <div class="note">${S.gran==="1D"?"daily":S.gran+" intraday (live)"} · <span style="color:#58a6ff">■</span>SMA ·
+      <span style="color:#c792ea">■</span>EMA/RSI · <span style="color:#58a6ff">■</span>BB · <span style="color:#ff8c3c">■</span>ATR/STOCH ·
+      <span style="color:#ffd166">■</span>VWAP · MACD — toggle above, ⚙ to edit periods · drag/hover for OHLC</div></div>
 
   <div class="cols"><div>
   <div class="panel"><div class="ph">Statistics · DES</div><div class="pb grid3">
@@ -1060,9 +1158,14 @@ function render(scroll){
   $$("canvas.spark").forEach(cv=>{const s=cv.dataset.spark,q=S.quotes[s];
     drawSpark(cv,q.spark,q.spark.at(-1)>=q.spark[0])});
   if(S.page==="security"){drawChart(S.sym);
+    if(S.gran!=="1D"&&!(S.ibars[S.sym]&&S.ibars[S.sym].length))setGran(S.gran);
     const cv=$("#chart");cv.onpointermove=chartHover;cv.onpointerleave=()=>$("#xhair").style.display="none";
     $$("[data-ind]").forEach(b=>b.onclick=()=>{const k=b.dataset.ind;
       if(k==="sma")S.showSMA=!S.showSMA;else S.ind[k]=!S.ind[k];render()});
+    $$("#granseg button").forEach(b=>b.onclick=()=>setGran(b.dataset.gran));
+    const pb=$("#parambtn");if(pb)pb.onclick=()=>{S.showParams=!S.showParams;render()};
+    $$('.pbox [data-p]').forEach(i=>i.onchange=()=>{
+      const v=parseFloat(i.value);if(!isNaN(v)&&v>=0){S.p[i.dataset.p]=v;saveParams();render()}});
     $$("#tfseg button").forEach(b=>b.onclick=()=>{S.tf=+b.dataset.tf;render()});
     $$("[data-tside]").forEach(b=>b.onclick=()=>{S.ticket.side=b.dataset.tside;syncTicket();render()});
     $$("[data-ttype]").forEach(b=>b.onclick=()=>{S.ticket.type=b.dataset.ttype;S.ticket.lp=null;syncTicket();render()});
@@ -1191,6 +1294,7 @@ function routeFromHash(initial){
     setInterval(async()=>{await liveRefresh();lightRepaint();
       if(["agents","portfolio","risk"].includes(S.page)
         &&document.activeElement.tagName!=="INPUT")render()},2000);
+    setInterval(fastTick,1000);   // second-by-second on the watched symbol
   }
 })();
 </script>

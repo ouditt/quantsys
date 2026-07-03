@@ -194,7 +194,8 @@ async def _tick_loop() -> None:
             day = _equity(broker) / broker.day_open_equity - 1
             if day <= -0.03:
                 gw.halt(f"daily loss limit hit ({day:.1%}) — new entries blocked")
-        await asyncio.sleep(5.0)     # venue-poll cadence (rate-limit friendly)
+        await asyncio.sleep(3.0)     # universe poll cadence (the active symbol
+        # is polled every ~1s separately via /api/quote for second-by-second)
 
 
 def _quote_row(sym: str) -> dict:
@@ -228,10 +229,45 @@ def quotes(): return [_quote_row(s) for s in state["hist"]]
 
 
 @app.get("/api/history/{sym}")
-def history(sym: str, bars: int = 380):
+def history(sym: str, bars: int = 380, tf: str = "1D"):
     if sym not in state["hist"]:
         raise HTTPException(404, "unknown symbol")
-    return {"symbol": sym, "bars": state["hist"][sym][-bars:]}
+    if tf in ("", "1D", "1Day", "D"):                 # bundled daily history
+        return {"symbol": sym, "tf": "1D", "bars": state["hist"][sym][-bars:]}
+    # intraday: fetched live from the venue (only for venue-served symbols)
+    broker = state["broker"]
+    vmap = state.get("vmap")
+    vsym = sym if vmap is None else vmap.get(sym)
+    frames = {"1Min": "1Min", "5Min": "5Min", "15Min": "15Min", "1H": "1Hour"}
+    if not vsym or tf not in frames or not hasattr(broker, "history"):
+        raise HTTPException(400, f"{sym}: no intraday on this venue (analyse-only "
+                                 "or unmapped symbol)")
+    try:
+        b = broker.history(vsym, bars, frames[tf])
+    except Exception as e:
+        raise HTTPException(502, f"intraday fetch failed: {str(e).splitlines()[0][:120]}")
+    return {"symbol": sym, "tf": tf, "bars": b}
+
+
+@app.get("/api/quote")
+async def quote_one(sym: str):
+    """Fresh single-symbol last trade — for second-by-second updates on the
+    symbol the user is watching."""
+    if sym not in state["hist"]:
+        raise HTTPException(404, "unknown symbol")
+    broker = state["broker"]
+    vmap = state.get("vmap")
+    vsym = sym if vmap is None else vmap.get(sym)
+    if vsym:
+        try:
+            p = await asyncio.to_thread(broker.get_quote, vsym)
+            if p and not math.isnan(p):
+                state["daemon"].context["quotes"].setdefault(sym, {})["last"] = p
+                return {"symbol": sym, "last": p, "asof": "live"}
+        except Exception:
+            pass
+    q = state["daemon"].context["quotes"].get(sym, {})
+    return {"symbol": sym, "last": q.get("last"), "asof": q.get("asof", "")}
 
 
 @app.get("/api/resolve")

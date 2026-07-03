@@ -333,25 +333,39 @@ class AlpacaBroker(Broker):
                 self._req["last"](symbol_or_symbols=symbol))
         return float(t[symbol].price)
 
-    def history(self, symbol: str, days: int = 400) -> list[dict]:
-        """Daily OHLCV bars for any venue-served symbol (stock/ETF or crypto
-        pair). Used to pull arbitrary tickers into the terminal on demand."""
+    def history(self, symbol: str, n: int = 400, tf: str = "1Day") -> list[dict]:
+        """OHLCV bars for any venue-served symbol (stock/ETF or crypto pair) at
+        any timeframe. tf in 1Min|5Min|15Min|1Hour|1Day. Used both to pull
+        arbitrary tickers into the terminal and to drive intraday charts."""
         from datetime import datetime, timedelta, timezone
-        from alpaca.data.timeframe import TimeFrame
-        start = datetime.now(timezone.utc) - timedelta(days=int(days * 1.7) + 7)
+        from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+        U = TimeFrameUnit
+        frames = {"1Min": TimeFrame(1, U.Minute), "5Min": TimeFrame(5, U.Minute),
+                  "15Min": TimeFrame(15, U.Minute), "1Hour": TimeFrame(1, U.Hour),
+                  "1Day": TimeFrame(1, U.Day)}
+        frame = frames.get(tf, frames["1Day"])
+        # calendar lookback that yields ~n bars of the requested granularity
+        per_day = {"1Min": 390, "5Min": 78, "15Min": 26, "1Hour": 7, "1Day": 1}[
+            tf if tf in frames else "1Day"]
+        span = max(2, int(n / per_day * (1.0 if tf == "1Day" else 1.6)) + 3)
+        if tf == "1Day":
+            span = int(n * 1.7) + 7
+        start = datetime.now(timezone.utc) - timedelta(days=span)
+        intraday = tf != "1Day"
         if "/" in symbol:
             from alpaca.data.requests import CryptoBarsRequest
             bs = self.dc.get_crypto_bars(CryptoBarsRequest(
-                symbol_or_symbols=symbol, timeframe=TimeFrame.Day, start=start))
+                symbol_or_symbols=symbol, timeframe=frame, start=start))
         else:
             from alpaca.data.requests import StockBarsRequest
             bs = self.d.get_stock_bars(StockBarsRequest(
-                symbol_or_symbols=symbol, timeframe=TimeFrame.Day, start=start))
+                symbol_or_symbols=symbol, timeframe=frame, start=start))
         rows = bs.data.get(symbol, [])
-        out = [{"t": b.timestamp.date().isoformat(), "o": float(b.open),
-                "h": float(b.high), "l": float(b.low), "c": float(b.close),
-                "v": float(b.volume)} for b in rows]
-        return out[-days:]
+        out = [{"t": (b.timestamp.strftime("%Y-%m-%d %H:%M") if intraday
+                      else b.timestamp.date().isoformat()),
+                "o": float(b.open), "h": float(b.high), "l": float(b.low),
+                "c": float(b.close), "v": float(b.volume)} for b in rows]
+        return out[-n:]
 
 
 class IBKRBroker(Broker):
