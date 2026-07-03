@@ -135,7 +135,9 @@ class AgentDaemon:
                 txt = report(w) if w else report()
                 self._save_report("risk_report", txt)
                 head = [l for l in txt.splitlines() if "VaR 99%" in l][:1]
-                return "DAILY RISK REPORT filed -> reports/; " + (head[0] if head else "")
+                p = self.context.get("posture", lambda: None)()
+                return ("DAILY RISK REPORT filed -> reports/; " +
+                        (f"posture {p}; " if p else "") + (head[0] if head else ""))
             if agent.name == "Validation Officer" and self._due("reverify", 168):
                 import pandas as pd, os
                 p = os.path.join(os.path.dirname(__file__), "registry_summary.csv")

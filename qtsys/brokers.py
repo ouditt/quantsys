@@ -304,6 +304,26 @@ class AlpacaBroker(Broker):
     def cancel(self, order_id: str) -> bool:
         self.c.cancel_order_by_id(order_id); return True
 
+    def recent_fills(self, limit: int = 500) -> list[dict]:
+        """Normalised fill stream from CLOSED orders — the real executed trades
+        the tracking module pairs into realised round-trips. Empty on any error
+        (e.g. brand-new account)."""
+        try:
+            from alpaca.trading.requests import GetOrdersRequest
+            from alpaca.trading.enums import QueryOrderStatus
+            req = GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=limit)
+            out = []
+            for o in self.c.get_orders(filter=req):
+                if not o.filled_qty or float(o.filled_qty) == 0 or not o.filled_avg_price:
+                    continue
+                out.append({"symbol": o.symbol, "side": o.side.value,
+                            "qty": float(o.filled_qty),
+                            "price": float(o.filled_avg_price),
+                            "ts": o.filled_at.timestamp() if o.filled_at else 0.0})
+            return out
+        except Exception:
+            return []
+
     def get_quote(self, symbol: str) -> float:
         if "/" in symbol:   # crypto pair, e.g. "BTC/USD"
             t = self.dc.get_crypto_latest_trade(

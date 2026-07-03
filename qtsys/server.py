@@ -1,13 +1,17 @@
-"""server.py — run:  pip install fastapi uvicorn && python -m qtsys.server
+"""server.py — run:  pip install fastapi uvicorn && ./start.sh  (or
+python -m uvicorn qtsys.server:app --port 8001)
 
-Serves the terminal at http://localhost:8000 in LIVE mode: the identical
-terminal.html that runs standalone in demo mode detects this API and switches
-to real state — PaperBroker by default ($0), or any venue via make_broker()
-("alpaca" paper, "ibkr", "ccxt" sandbox, "oanda" practice, "tradier" paper).
+Serves terminal.html in LIVE mode against a REAL venue. The simulator has been
+removed: QTSYS_BROKER selects alpaca (paper or live) or ibkr; quotes and fills
+come from the venue, never from a replay tape. The posture bar's distribution
+stats come from the real out-of-sample backtest (sizing.posture_table), and
+/api/tracking compares that backtest against the account's actual realised
+trades so drift is visible (skill 10's "live-vs-backtest within 1 SE" gate).
 """
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import time
 
@@ -24,9 +28,8 @@ except ImportError as e:                                   # pragma: no cover
 
 HERE = os.path.dirname(__file__)
 
-# 100% REAL bundled data. In sandbox/demo the tape REPLAYS real daily history
-# (1 bar/second, clearly labelled); with broker keys (user machine) quotes come
-# from the venue's live feed instead. No simulated prices exist in this system.
+# 100% REAL bundled data — used for history charts and analyse-only symbols.
+# Tradable prices come LIVE from the venue; nothing here is simulated.
 UNIVERSE = [
     ("WTI",    "WTI Crude Oil (spot, daily 1986->)",      "Commodity", True),
     ("BRENT",  "Brent Crude Oil (spot, daily 1987->)",    "Commodity", True),
@@ -44,14 +47,16 @@ UNIVERSE = [
     ("SPX",    "S&P 500 (monthly 1871->, Shiller)",       "Monthly — page-only", False),
 ]
 TRADABLE = {s for s, _, _, ok in UNIVERSE if ok}
+MONTHLY = {"GOLD", "SPX"}          # page-only: pinned to their latest real bar
+CLS = {s: c for s, _, c, _ in UNIVERSE}
+
 # engine symbol -> venue symbol, per venue. Anything not mapped is NOT sent to
 # the venue (engine codes like "WTI" collide with unrelated NYSE tickers).
 VENUE_SYMBOLS = {
     "alpaca": {"BTC": "BTC/USD", "ETH": "ETH/USD"},
     "ibkr": None,   # None = venue serves the engine symbols directly
 }
-MONTHLY = {"GOLD", "SPX"}          # page-only: pinned to their latest real bar
-REPLAY_BARS = 250          # the live tape replays the last 250 REAL daily bars
+POSTURE_SCALE = {"SURVIVAL": 0.5, "BALANCED": 1.0, "AGGRESSIVE": 1.5}
 
 app = FastAPI(title="qtsys terminal API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
@@ -65,6 +70,23 @@ def _equity(broker) -> float:
     if hasattr(broker, "equity"):
         return broker.equity()
     return float(broker.get_account().get("equity", 0.0))
+
+
+def _cls_of(sym: str) -> str:
+    """Asset class for an engine OR venue symbol (BTC and BTC/USD -> Crypto)."""
+    if sym in CLS:
+        return CLS[sym]
+    base = sym.split("/")[0]
+    return CLS.get(base, "")
+
+
+def _fills(broker) -> list[dict]:
+    """Normalised fill stream across brokers, for realised-trade tracking."""
+    if hasattr(broker, "fills"):
+        return list(broker.fills)
+    if hasattr(broker, "recent_fills"):
+        return broker.recent_fills()
+    return []
 
 
 @app.on_event("startup")
@@ -89,6 +111,7 @@ async def boot() -> None:
         raise SystemExit(
             f"QTSYS_BROKER={venue!r}: the simulator has been removed from the "
             "live terminal — set QTSYS_BROKER=alpaca or ibkr")
+
     gw = ExecutionGateway(broker, RiskLimits(max_order_notional=60_000,
                                              max_position_notional=120_000,
                                              max_gross_leverage=2.0))
@@ -108,6 +131,8 @@ async def boot() -> None:
                          "v": None})
             prev = c
         hist[sym] = bars
+    # a real venue supplies its own quotes and starts with whatever is actually
+    # in the account — no seeded demo book, no replay ticks.
     broker.day_open_equity = _equity(broker)
 
     daemon = AgentDaemon(
@@ -118,8 +143,23 @@ async def boot() -> None:
     if daemon.llm_fn:
         daemon.log("__system__", f"LLM backends: {daemon.llm_fn.backends}")
     await daemon.start()
+
+    from .sizing import posture_table
+    state["posture_stats"] = posture_table()      # from the REAL backtest trades
+    names = ("SURVIVAL", "BALANCED", "AGGRESSIVE")
+    try:
+        row = daemon.db.execute("SELECT v FROM kv WHERE k='posture_name'").fetchone()
+        state["posture"] = names[int(row[0])] if row else "BALANCED"
+    except Exception:
+        state["posture"] = "BALANCED"
+    state["base_limits"] = {"order": gw.limits.max_order_notional,
+                            "position": gw.limits.max_position_notional}
+    scale = POSTURE_SCALE[state["posture"]]
+    gw.limits.max_order_notional *= scale
+    gw.limits.max_position_notional *= scale
+    daemon.context["posture"] = lambda: state["posture"]
     state.update(broker=broker, gw=gw, hist=hist, daemon=daemon,
-                 vmap=VENUE_SYMBOLS.get(venue),
+                 venue=venue, vmap=VENUE_SYMBOLS.get(venue),
                  meta={s: (n, c) for s, n, c, _ in UNIVERSE})
     asyncio.create_task(_tick_loop())
 
@@ -128,7 +168,6 @@ async def _tick_loop() -> None:
     """LIVE quotes only. Every cycle, poll the venue for a fresh price on each
     tradable symbol; symbols the venue doesn't serve fall back to their latest
     REAL recorded close (marked with its date). No replay, no simulated tape."""
-    import math
     broker = state["broker"]
     dead: set[str] = set()          # symbols this venue has refused to quote
     while True:
@@ -148,8 +187,7 @@ async def _tick_loop() -> None:
             if price is None:
                 price = last_close
             q[sym] = {"last": price,
-                      "chg_pct": (price / prev_close - 1) * 100,
-                      "asof": asof}
+                      "chg_pct": (price / prev_close - 1) * 100, "asof": asof}
         # deterministic circuit breaker (portfolio_risk.LIMITS): -3% on the day
         gw = state["gw"]
         if not gw.halted and broker.day_open_equity:
@@ -172,8 +210,15 @@ def _quote_row(sym: str) -> dict:
             "spark": [b["c"] for b in bars[-40:]]}
 
 
+def _tracking() -> dict:
+    from .tracking import tracking_report
+    return tracking_report(_fills(state["broker"]), _cls_of)
+
+
 @app.get("/api/health")
 def health(): return {"ok": True, "mode": "live",
+                      "venue": state.get("venue", "?"),
+                      "posture": state.get("posture", "BALANCED"),
                       "note": "live venue quotes and fills; no simulation",
                       "ts": time.time()}
 
@@ -199,7 +244,7 @@ def account():
 
 @app.get("/api/positions")
 def positions():
-    b: PaperBroker = state["broker"]
+    b = state["broker"]
     return [p.to_dict(b.get_quote(p.symbol)) for p in b.get_positions()]
 
 
@@ -241,13 +286,50 @@ def kill():
 def resume(): state["gw"].resume(); return {"halted": False}
 
 
+@app.get("/api/posture")
+async def api_posture():
+    # posture stats are the REAL backtest stats; tracking compares them to the
+    # account's actual realised performance
+    return {"current": state.get("posture", "BALANCED"),
+            "stats": state.get("posture_stats", {}),
+            **await asyncio.to_thread(_tracking)}
+
+
+@app.post("/api/posture")
+async def api_posture_set(body: dict):
+    p = str(body.get("posture", "")).upper()
+    if p not in POSTURE_SCALE:
+        raise HTTPException(400, "posture must be SURVIVAL | BALANCED | AGGRESSIVE")
+    state["posture"] = p
+    d = state["daemon"]
+    d.db.execute("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v REAL)")
+    d.db.execute("INSERT OR REPLACE INTO kv VALUES ('posture_name', ?)",
+                 (float(("SURVIVAL", "BALANCED", "AGGRESSIVE").index(p)),))
+    d.db.commit()
+    scale = POSTURE_SCALE[p]
+    base = state["base_limits"]
+    gw = state["gw"]
+    gw.limits.max_order_notional = base["order"] * scale
+    gw.limits.max_position_notional = base["position"] * scale
+    d.log("Risk Officer", f"POSTURE set to {p} — every agent now sizes at "
+          f"{state['posture_stats'][p]['risk_per_trade']:.2%}/trade; "
+          f"gateway order cap scaled x{scale}", "warn")
+    return {"current": p, "stats": state["posture_stats"]}
+
+
+@app.get("/api/tracking")
+async def api_tracking():
+    """Backtest baseline vs the account's REAL realised trades, and the drift."""
+    return await asyncio.to_thread(_tracking)
+
+
 @app.get("/api/scan")
 async def api_scan():
     """Morning scan (cards 1/4): fresh setups ranked by their own real
     out-of-sample track records. Cached for an hour."""
     import time as _t
     if _t.time() - state.get("scan_ts", 0) > 3600:
-        from .routine import morning_briefing, scan
+        from .routine import scan
         df = await asyncio.to_thread(scan)
         state["scan"] = df.to_dict(orient="records") if len(df) else []
         state["scan_ts"] = _t.time()
@@ -269,7 +351,7 @@ def agent_log(limit: int = 60): return state["daemon"].recent_log(limit)
 
 
 @app.get("/api/fills")
-def fills(): return state["broker"].fills[::-1][:50]
+def fills(): return _fills(state["broker"])[::-1][:50]
 
 
 @app.get("/")

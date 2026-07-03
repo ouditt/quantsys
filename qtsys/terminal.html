@@ -28,6 +28,42 @@ a{color:var(--amber);text-decoration:none}
 .num{font-variant-numeric:tabular-nums}
 .up{color:var(--up)} .dn{color:var(--dn)} .mut{color:var(--mut)}
 
+/* ------------------------------------------- posture themes */
+body[data-posture="SURVIVAL"]{
+  --bg0:#04100a; --bg1:#071810; --panel:#0a2015; --panel2:#0d2a1c;
+  --line:#153422; --line2:#1e462e; --amber-glow:rgba(39,209,127,.14);}
+body[data-posture="AGGRESSIVE"]{
+  --bg0:#050a16; --bg1:#091223; --panel:#0d1a30; --panel2:#11223f;
+  --line:#1a2c4d; --line2:#254066; --amber-glow:rgba(88,166,255,.14);}
+#pbar{display:flex;align-items:center;gap:8px;padding:5px 12px;flex-wrap:wrap;
+  background:var(--bg1);border-bottom:1px solid var(--line);font-size:11px}
+#pbar .lbl{color:var(--mut2);letter-spacing:.1em;font-size:10px}
+#pbar .pdiv{color:var(--line2);margin:0 2px}
+#pbar .v.pos{color:#27d17f}
+#pbar .v.neg{color:#ff6b6b}
+#pbar .v.tk-ok{color:#27d17f}
+#pbar .v.tk-bad{color:#ff6b6b}
+#pbar .v.tk-wait{color:var(--mut2)}
+.pseg{display:flex;border:1px solid var(--line2);border-radius:4px;overflow:hidden}
+.pseg button{padding:3px 9px;font-size:10px;letter-spacing:.06em;color:var(--mut)}
+.pseg button+button{border-left:1px solid var(--line2)}
+.pseg button.on[data-p="SURVIVAL"]{background:rgba(39,209,127,.15);color:var(--up)}
+.pseg button.on[data-p="BALANCED"]{background:rgba(255,178,0,.15);color:var(--amber)}
+.pseg button.on[data-p="AGGRESSIVE"]{background:rgba(88,166,255,.15);color:var(--info)}
+.pstat{display:flex;align-items:baseline;gap:4px;white-space:nowrap}
+.pstat .k{color:var(--mut2);font-size:10px}
+.pstat .v{font-weight:600}
+.help{display:inline-block;width:12px;height:12px;line-height:12px;text-align:center;
+  border:1px solid var(--line2);border-radius:50%;color:var(--mut2);font-size:9px;
+  cursor:help;position:relative;user-select:none}
+.help::after{content:attr(data-tip);position:absolute;left:50%;top:16px;
+  transform:translateX(-50%);width:230px;background:var(--panel2);
+  border:1px solid var(--line2);border-radius:4px;padding:7px 8px;color:var(--txt);
+  font-size:10px;line-height:1.5;white-space:normal;z-index:60;display:none;
+  box-shadow:0 6px 18px rgba(0,0,0,.5)}
+.help:hover::after,.help:focus::after{display:block}
+#pbar .help:nth-last-child(-n+2)::after{left:auto;right:0;transform:none}
+
 /* ------------------------------------------------ header */
 #top{display:flex;align-items:center;gap:12px;padding:8px 12px;
   background:var(--bg1);border-bottom:1px solid var(--line);flex-wrap:wrap}
@@ -219,6 +255,8 @@ tr.rowlink:hover{background:var(--panel2)}
   <button id="killbtn">KILL</button>
 </header>
 
+<div id="pbar"><span class="lbl">POSTURE</span><div class="pseg" id="pseg"><button data-p="SURVIVAL">SURVIVAL</button><button data-p="BALANCED">BALANCED</button><button data-p="AGGRESSIVE">AGGRESSIVE</button></div><span class="pstat"><span class="k">RISK/TRADE</span><span class="help" tabindex="0" data-tip="Fraction of account equity lost if the stop is hit. Position size is solved FROM this number (skill 03) — it is the only lever that buys speed, and this bar prices it.">?</span><span class="v num" id="ps0">—</span></span><span class="pstat"><span class="k">PER 100 TRADES</span><span class="help" tabindex="0" data-tip="Median account multiple after 100 trades — 10,000 bootstrap resamples of the 317 REAL out-of-sample flagship trades, not a projection.">?</span><span class="v num" id="ps1">—</span></span><span class="pstat"><span class="k">P(DOUBLE)</span><span class="help" tabindex="0" data-tip="Probability the account touches 2x its starting equity at any point within 100 trades.">?</span><span class="v num" id="ps2">—</span></span><span class="pstat"><span class="k">MED MAXDD</span><span class="help" tabindex="0" data-tip="Median of the worst peak-to-trough drawdown experienced along each 100-trade path. Expect roughly this at least once.">?</span><span class="v num" id="ps3">—</span></span><span class="pstat"><span class="k">P(DD>30%)</span><span class="help" tabindex="0" data-tip="Chance of a drawdown deeper than 30% somewhere in 100 trades — the honest price of the aggressive setting.">?</span><span class="v num" id="ps4">—</span></span><span class="pstat"><span class="k">P(DD>50%)</span><span class="help" tabindex="0" data-tip="Chance of losing half the account at some point — ruin-adjacent. Any plan that needs this risk level is a plan to gamble.">?</span><span class="v num" id="ps5">—</span></span><span class="pdiv" aria-hidden="true">│</span><span class="pstat"><span class="k">BT E/TRADE</span><span class="help" tabindex="0" data-tip="Certified BACKTEST expectancy per trade — net of fees, from the real out-of-sample flagship trades. This is what the account is underwritten on.">?</span><span class="v num" id="tk_bt">—</span></span><span class="pstat"><span class="k">LIVE E/TRADE</span><span class="help" tabindex="0" data-tip="Realised expectancy per trade from the account's ACTUAL executed round-trips (venue fills, netted at the same fee model). Blank until real trades exist.">?</span><span class="v num" id="tk_live">—</span></span><span class="pstat"><span class="k">Δ vs BT</span><span class="help" tabindex="0" data-tip="Live minus backtest expectancy. The go-live gate (skill 10) is live within 1 SE of the certified backtest value.">?</span><span class="v num" id="tk_diff">—</span></span><span class="pstat"><span class="k">LIVE TRADES</span><span class="help" tabindex="0" data-tip="Number of realised round-trips executed on the venue. Need >=30 for a statistically meaningful comparison.">?</span><span class="v num" id="tk_n">0</span></span><span class="pstat"><span class="k">TRACKING</span><span class="help" tabindex="0" data-tip="Verdict: on-model = live expectancy within 1 SE of backtest; DRIFT = live has diverged from the backtest and needs review before scaling.">?</span><span class="v" id="tk_verdict">—</span></span></div>
+
 <div id="tape" aria-hidden="true"><div id="tape-inner"></div></div>
 
 <div id="shell">
@@ -229,7 +267,7 @@ tr.rowlink:hover{background:var(--panel2)}
 <div id="cmdwrap">
   <div id="cmdrow"><span class="p">&gt;</span>
     <input id="cmd" autocomplete="off" spellcheck="false"
-      placeholder="WTI · BTC GP · POS · RISK · AGT · BUY WTI 100 · KILL · HELP" aria-label="command">
+      placeholder="WTI · BTC GP · POS · RISK · POSTURE SURVIVAL · BUY WTI 100 · KILL · HELP" aria-label="command">
   </div>
   <div id="cmdhint"><b>&lt;TICKER&gt;</b> security page · <b>POS</b> portfolio · <b>RISK</b> · <b>AGT</b> agents · <b>STRAT</b> · <b>MKT</b> · <b>BUY/SELL SYM QTY [LMT px]</b> · <b>KILL</b></div>
 </div>
@@ -344,6 +382,7 @@ function demoInit(){
   pushOrder({symbol:"NATGAS",side:"sell",qty:1500,type:"limit",
     limit_price:+(S.quotes["NATGAS"].last*1.03).toFixed(3),status:"working"});
   S.news=deriveEvents();
+  applyPosture(CUR_POSTURE,false);
   recalcAccount();S.account.day_open=S.account.equity;S.peak=S.account.equity;
 }
 function bookCost(){return S.positions.reduce((a,p)=>a+p.qty*p.avg_cost,0)}
@@ -423,6 +462,31 @@ function agentsTick(){
 
 /* ============================================================ live (API) mode */
 const API=location.origin.startsWith("http")?location.origin:"";
+const POSTURE_STATS={"SURVIVAL":{"risk_per_trade":0.0075,"note":"0.75%/trade \u2014 half of worst-case Kelly","per_100_trades":1.109,"p_double":0.0,"median_maxdd":-0.08,"p_dd30":0.0003,"p_dd50":0.0},"BALANCED":{"risk_per_trade":0.015,"note":"1.5%/trade + drawdown throttle","per_100_trades":1.213,"p_double":0.0224,"median_maxdd":-0.1568,"p_dd30":0.0537,"p_dd50":0.0005},"AGGRESSIVE":{"risk_per_trade":0.025,"note":"2.5%/trade \u2014 at worst-case Kelly, expect pain","per_100_trades":1.341,"p_double":0.2064,"median_maxdd":-0.2535,"p_dd30":0.3379,"p_dd50":0.03}};
+let CUR_POSTURE="BALANCED";
+function applyPosture(name,push){
+  if(!POSTURE_STATS[name])return;
+  CUR_POSTURE=name;
+  document.body.dataset.posture=name;
+  document.querySelectorAll("#pseg button").forEach(b=>b.classList.toggle("on",b.dataset.p===name));
+  const s=POSTURE_STATS[name];
+  const pc=x=>(x*100).toFixed(x*100<1&&x>0?2:1)+"%";
+  $("#ps0").textContent=pc(s.risk_per_trade);
+  $("#ps1").textContent=s.per_100_trades.toFixed(2)+"\u00d7";
+  $("#ps2").textContent=pc(s.p_double);
+  $("#ps3").textContent=(s.median_maxdd*100).toFixed(1)+"%";
+  $("#ps4").textContent=pc(s.p_dd30);
+  $("#ps5").textContent=pc(s.p_dd50);
+  if(push){
+    toast("POSTURE \u2192 "+name+" \u2014 "+s.note,"ok");
+    alog("Risk Officer","posture set to "+name+" ("+pc(s.risk_per_trade)+"/trade); all agents sized accordingly","warn");
+    if(S.mode==="live")j("/api/posture",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({posture:name})}).catch(e=>toast("server rejected posture: "+(e.detail||e),"err"));
+  }
+}
+document.addEventListener("click",e=>{
+  const b=e.target.closest("#pseg button");
+  if(b)applyPosture(b.dataset.p,true);
+});
 async function j(url,opt){const r=await fetch(API+url,opt);if(!r.ok)throw await r.json().catch(()=>({detail:r.status}));return r.json()}
 async function tryLive(){
   try{const ctl=new AbortController();setTimeout(()=>ctl.abort(),900);
@@ -436,6 +500,23 @@ async function liveInit(){
   await liveRefresh(true);
   for(const s of Object.keys(S.bars))FULL[s]=S.bars[s];
   S.news=deriveEvents();
+  try{const P=await j("/api/posture");Object.assign(POSTURE_STATS,P.stats);applyPosture(P.current,false);renderTracking(P)}
+  catch(e){applyPosture(CUR_POSTURE,false)}
+}
+function renderTracking(P){
+  if(!P||!P.backtest)return;
+  const pc=x=>(x==null||isNaN(x))?"—":(x>=0?"+":"")+(x*100).toFixed(3)+"%";
+  $("#tk_bt").textContent=pc(P.backtest.expectancy);
+  const L=P.live, T=P.tracking||{};
+  $("#tk_live").textContent=L?pc(L.expectancy):"—";
+  $("#tk_diff").textContent=(T.expectancy_diff!=null)?pc(T.expectancy_diff):"—";
+  $("#tk_n").textContent=(T.live_trades!=null?T.live_trades:(L?L.n:0));
+  const v=$("#tk_verdict");
+  v.textContent=T.verdict||"—";
+  v.className="v tk-"+(T.within_1se===true?"ok":T.within_1se===false?"bad":"wait");
+  const d=$("#tk_diff");
+  d.classList.toggle("pos",(T.expectancy_diff||0)>0);
+  d.classList.toggle("neg",(T.expectancy_diff||0)<0);
 }
 async function liveRefresh(full){
   try{
@@ -451,6 +532,8 @@ async function liveRefresh(full){
     const lg=await j("/api/agents/log?limit=80");
     S.alog=lg.map(x=>({ts:x.ts,agent:x.agent,level:x.level,message:x.message}));
     const f=await j("/api/fills");S.fills=f;
+    if(!S._tkTs||Date.now()-S._tkTs>15000){S._tkTs=Date.now();
+      j("/api/tracking").then(T=>{if(T&&T.backtest)renderTracking(T)}).catch(()=>{});}
     if(full){for(const s of Object.keys(S.quotes)){
       const h=await j(`/api/history/${encodeURIComponent(s)}`);S.bars[s]=h.bars}}
   }catch(e){/* transient */}
@@ -987,7 +1070,9 @@ function runCmd(raw){
     AGT:"agents",AGENTS:"agents",STRAT:"strats",STRATS:"strats",MKT:"markets",
     MARKETS:"markets",NEWS:"markets",HELP:null,KILL:null};
   if(c==="KILL"){killSwitch();return}
-  if(c==="HELP"){toast("TICKER · TICKER GP/DES · POS · RISK · AGT · STRAT · BUY/SELL SYM QTY [LMT px] · KILL");return}
+  if(c==="POSTURE"&&parts[1]&&POSTURE_STATS[parts[1]]){applyPosture(parts[1],true);return}
+  if(POSTURE_STATS[c]){applyPosture(c,true);return}
+  if(c==="HELP"){toast("TICKER · TICKER GP/DES · POS · RISK · AGT · STRAT · BUY/SELL SYM QTY [LMT px] · POSTURE SURVIVAL|BALANCED|AGGRESSIVE · KILL");return}
   if(parts[0]==="BUY"||parts[0]==="SELL"){
     const sym=normSym(parts[1]);if(!sym){toast("Unknown symbol "+parts[1],"err");return}
     const qty=parseFloat(parts[2]);

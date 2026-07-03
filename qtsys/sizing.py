@@ -140,6 +140,22 @@ def scaling_roadmap(start: float, target: float, posture: Posture,
     return rungs
 
 
+def posture_table(n_trades: int = 100) -> dict:
+    """The six headline stats per posture, from the real flagship trades.
+    Deterministic (fixed bootstrap seed) — server and terminal show the same."""
+    r = load_flagship_returns()
+    out = {}
+    for po in POSTURES:
+        st = bootstrap(r, po.risk_pct, n_trades)
+        out[po.name.split("-")[0]] = {
+            "risk_per_trade": po.risk_pct, "note": po.note,
+            "per_100_trades": round(st["median_terminal"], 3),
+            "p_double": round(st["p_double"], 4),
+            "median_maxdd": round(st["median_maxdd"], 4),
+            "p_dd30": round(st["p_dd30"], 4), "p_dd50": round(st["p_dd50"], 4)}
+    return out
+
+
 def report(accounts=(500, 1000, 1500), n_trades: int = 100) -> None:
     r = load_flagship_returns()
     wins = r[r > 0]; losses = r[r < 0]

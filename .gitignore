@@ -7,3 +7,6 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# runtime state (agent logs, posture kv) — regenerated on boot
+*.db
