@@ -245,7 +245,16 @@ def account():
 @app.get("/api/positions")
 def positions():
     b = state["broker"]
-    return [p.to_dict(b.get_quote(p.symbol)) for p in b.get_positions()]
+    out = []
+    for p in b.get_positions():
+        try:                             # options/delisted/odd symbols may not
+            last = b.get_quote(p.symbol)  # quote — never let one blank the book
+            if last is None or (isinstance(last, float) and math.isnan(last)):
+                last = p.avg_price
+        except Exception:
+            last = p.avg_price
+        out.append(p.to_dict(last))
+    return out
 
 
 @app.get("/api/orders")

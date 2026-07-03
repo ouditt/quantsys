@@ -520,22 +520,25 @@ function renderTracking(P){
 }
 async function liveRefresh(full){
   try{
-    const [qs,acct,pos,ords,ag]=await Promise.all([
+    // allSettled: one failing endpoint (e.g. a position that can't be quoted)
+    // must never blank the rest of the terminal (agents, chart, book).
+    const [qs,acct,pos,ords,ag]=(await Promise.allSettled([
       j("/api/quotes"),j("/api/account"),j("/api/positions"),
-      j("/api/orders"),j("/api/agents")]);
-    qs.forEach(q=>{const o=S.quotes[q.symbol]||{};o.last=q.last;o.prevClose=q.last-q.chg;o.spark=q.spark;S.quotes[q.symbol]=o});
-    Object.assign(S.account,acct);S.halted=!!acct.halted;
-    S.positions=pos.map(p=>({symbol:p.symbol,qty:p.qty,avg_cost:p.avg_cost}));
-    S.orders=ords.map(o=>({id:o.id,symbol:o.symbol,side:o.side,qty:o.qty,
+      j("/api/orders"),j("/api/agents")])).map(r=>r.status==="fulfilled"?r.value:null);
+    if(qs)qs.forEach(q=>{const o=S.quotes[q.symbol]||{};o.last=q.last;o.prevClose=q.last-q.chg;o.spark=q.spark;S.quotes[q.symbol]=o});
+    if(acct){Object.assign(S.account,acct);S.halted=!!acct.halted;}
+    if(pos)S.positions=pos.map(p=>({symbol:p.symbol,qty:p.qty,avg_cost:p.avg_cost}));
+    if(ords)S.orders=ords.map(o=>({id:o.id,symbol:o.symbol,side:o.side,qty:o.qty,
       type:o.type,limit_price:o.limit_price,status:o.status,ts:o.ts}));
-    S.agents.master=ag.master;S.agents.list=ag.agents;
-    const lg=await j("/api/agents/log?limit=80");
-    S.alog=lg.map(x=>({ts:x.ts,agent:x.agent,level:x.level,message:x.message}));
-    const f=await j("/api/fills");S.fills=f;
+    if(ag){S.agents.master=ag.master;S.agents.list=ag.agents;}
+    const lg=await j("/api/agents/log?limit=80").catch(()=>null);
+    if(lg)S.alog=lg.map(x=>({ts:x.ts,agent:x.agent,level:x.level,message:x.message}));
+    const f=await j("/api/fills").catch(()=>null);if(f)S.fills=f;
     if(!S._tkTs||Date.now()-S._tkTs>15000){S._tkTs=Date.now();
       j("/api/tracking").then(T=>{if(T&&T.backtest)renderTracking(T)}).catch(()=>{});}
     if(full){for(const s of Object.keys(S.quotes)){
-      const h=await j(`/api/history/${encodeURIComponent(s)}`);S.bars[s]=h.bars}}
+      const h=await j(`/api/history/${encodeURIComponent(s)}`).catch(()=>null);
+      if(h&&h.bars)S.bars[s]=h.bars}}
   }catch(e){/* transient */}
 }
 
