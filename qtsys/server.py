@@ -234,6 +234,45 @@ def history(sym: str, bars: int = 380):
     return {"symbol": sym, "bars": state["hist"][sym][-bars:]}
 
 
+@app.get("/api/resolve")
+def resolve(q: str):
+    """Search the venue for any ticker and add it live: US equities/ETFs and
+    crypto pairs (Alpaca). Forex beyond the bundled majors needs IBKR/Oanda."""
+    broker = state["broker"]
+    venue = state.get("venue", "?")
+    raw = (q or "").strip().upper().replace(" ", "")
+    if not raw:
+        raise HTTPException(400, "empty query")
+    if raw in state["hist"]:
+        return {"added": False, "symbol": raw, "row": _quote_row(raw)}
+    if not hasattr(broker, "history"):
+        raise HTTPException(400, f"ticker search is not supported on {venue}")
+    # candidates: explicit crypto pair, else try equity then crypto-vs-USD
+    cands = ([(raw.split("/")[0], raw, "Crypto")] if "/" in raw
+             else [(raw, raw, "Equity"), (raw, raw + "/USD", "Crypto")])
+    last_err = "no data"
+    for eng, ven, cls in cands:
+        try:
+            hist = broker.history(ven, 400)
+            if not hist or len(hist) < 5:
+                last_err = "no history"
+                continue
+            name = f"{eng} — {cls} (live via {venue})"
+            state["hist"][eng] = hist
+            state["meta"][eng] = (name, cls)
+            CLS[eng] = cls
+            TRADABLE.add(eng)
+            if state.get("vmap") is not None:
+                state["vmap"][eng] = ven
+            state["daemon"].log("Research Analyst",
+                                f"universe += {eng} ({cls}) via {venue}")
+            return {"added": True, "symbol": eng, "row": _quote_row(eng)}
+        except Exception as e:                       # not served as this class
+            last_err = str(e).split("\n")[0][:140]
+    raise HTTPException(404, f"'{raw}' not found on {venue} ({last_err}). "
+                             "Forex beyond the bundled majors needs IBKR/Oanda.")
+
+
 @app.get("/api/account")
 def account():
     a = state["broker"].get_account()

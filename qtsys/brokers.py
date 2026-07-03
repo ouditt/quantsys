@@ -333,6 +333,26 @@ class AlpacaBroker(Broker):
                 self._req["last"](symbol_or_symbols=symbol))
         return float(t[symbol].price)
 
+    def history(self, symbol: str, days: int = 400) -> list[dict]:
+        """Daily OHLCV bars for any venue-served symbol (stock/ETF or crypto
+        pair). Used to pull arbitrary tickers into the terminal on demand."""
+        from datetime import datetime, timedelta, timezone
+        from alpaca.data.timeframe import TimeFrame
+        start = datetime.now(timezone.utc) - timedelta(days=int(days * 1.7) + 7)
+        if "/" in symbol:
+            from alpaca.data.requests import CryptoBarsRequest
+            bs = self.dc.get_crypto_bars(CryptoBarsRequest(
+                symbol_or_symbols=symbol, timeframe=TimeFrame.Day, start=start))
+        else:
+            from alpaca.data.requests import StockBarsRequest
+            bs = self.d.get_stock_bars(StockBarsRequest(
+                symbol_or_symbols=symbol, timeframe=TimeFrame.Day, start=start))
+        rows = bs.data.get(symbol, [])
+        out = [{"t": b.timestamp.date().isoformat(), "o": float(b.open),
+                "h": float(b.high), "l": float(b.low), "c": float(b.close),
+                "v": float(b.volume)} for b in rows]
+        return out[-days:]
+
 
 class IBKRBroker(Broker):
     """Multi-asset (stocks/options/futures/FX/bonds) via TWS or IB Gateway.

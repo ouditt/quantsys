@@ -267,7 +267,7 @@ tr.rowlink:hover{background:var(--panel2)}
 <div id="cmdwrap">
   <div id="cmdrow"><span class="p">&gt;</span>
     <input id="cmd" autocomplete="off" spellcheck="false"
-      placeholder="WTI · BTC GP · POS · RISK · POSTURE SURVIVAL · BUY WTI 100 · KILL · HELP" aria-label="command">
+      placeholder="search any ticker: TSLA · SPY · NVDA · SOL/USD · BTC · POS · BUY WTI 100 · POSTURE BALANCED · KILL · HELP" aria-label="command">
   </div>
   <div id="cmdhint"><b>&lt;TICKER&gt;</b> security page · <b>POS</b> portfolio · <b>RISK</b> · <b>AGT</b> agents · <b>STRAT</b> · <b>MKT</b> · <b>BUY/SELL SYM QTY [LMT px]</b> · <b>KILL</b></div>
 </div>
@@ -325,6 +325,7 @@ const LIMITS={max_order_notional:60000,max_position_notional:120000,max_gross_le
 /* ============================================================ state */
 const S={
  mode:"demo", page:"markets", sym:null, tf:380, showSMA:true,
+ ind:{bb:false,ema:false,rsi:false,macd:false},
  quotes:{},                 // sym -> {last, prevClose, spark[]}
  bars:{},                   // sym -> [{t,o,h,l,c,v}]
  positions:[], orders:[], fills:[],
@@ -555,6 +556,23 @@ function rvol(cs,n=20){const rs=[];for(let i=cs.length-n;i<cs.length;i++)
   rs.push(Math.log(cs[i]/cs[i-1]));
   const m=rs.reduce((a,b)=>a+b,0)/n;
   return Math.sqrt(rs.reduce((a,b)=>a+(b-m)**2,0)/(n-1))*Math.sqrt(252)}
+/* --- full-series indicators for the chart --- */
+function emaArr(cs,n){const k=2/(n+1),out=Array(cs.length).fill(null);let e=null;
+  for(let i=0;i<cs.length;i++){e=(e==null)?cs[i]:cs[i]*k+e*(1-k);if(i>=n-1)out[i]=e}return out}
+function bollArr(cs,n=20,k=2){const mid=smaArr(cs,n),up=Array(cs.length).fill(null),lo=Array(cs.length).fill(null);
+  for(let i=n-1;i<cs.length;i++){const m=mid[i];let s=0;for(let j=i-n+1;j<=i;j++)s+=(cs[j]-m)**2;
+    const sd=Math.sqrt(s/n);up[i]=m+k*sd;lo[i]=m-k*sd}return{mid,up,lo}}
+function rsiArr(cs,n=14){const out=Array(cs.length).fill(null);if(cs.length<=n)return out;
+  let g=0,l=0;for(let i=1;i<=n;i++){const d=cs[i]-cs[i-1];if(d>=0)g+=d;else l-=d}g/=n;l/=n;
+  out[n]=l===0?100:100-100/(1+g/l);
+  for(let i=n+1;i<cs.length;i++){const d=cs[i]-cs[i-1];
+    g=(g*(n-1)+(d>0?d:0))/n;l=(l*(n-1)+(d<0?-d:0))/n;out[i]=l===0?100:100-100/(1+g/l)}return out}
+function macdArr(cs,f=12,sl=26,sig=9){const ef=emaArr(cs,f),es=emaArr(cs,sl);
+  const macd=cs.map((_,i)=>(ef[i]!=null&&es[i]!=null)?ef[i]-es[i]:null);
+  const sigRaw=emaArr(macd.map(v=>v==null?0:v),sig);
+  const signal=sigRaw.map((v,i)=>macd[i]==null?null:v);
+  const hist=macd.map((v,i)=>(v!=null&&signal[i]!=null)?v-signal[i]:null);
+  return{macd,signal,hist}}
 function agentRead(sym){
   const bars=S.bars[sym];if(!bars||bars.length<120)return null;
   const cs=bars.map(b=>b.c),s20=smaArr(cs,20),s100=smaArr(cs,100);
@@ -587,18 +605,28 @@ let CH=null;
 function drawChart(sym){
   const cv=$("#chart");if(!cv)return;
   const all=S.bars[sym]||[];const bars=all.slice(-S.tf);if(bars.length<5)return;
-  const dpr=devicePixelRatio||1,w=cv.clientWidth,h=Math.max(280,Math.min(390,innerHeight*0.4));
+  const cs=bars.map(b=>b.c);
+  const I=S.ind,panes=[];if(I.rsi)panes.push("rsi");if(I.macd)panes.push("macd");
+  const dpr=devicePixelRatio||1,w=cv.clientWidth;
+  const padR=58,padB=44,padT=8,vh=30,paneH=84,paneGap=8;
+  const priceH=Math.max(230,Math.min(360,innerHeight*0.38));
+  const oscH=panes.length*(paneH+paneGap);
+  const h=padT+priceH+oscH+padB;
   cv.width=w*dpr;cv.height=h*dpr;cv.style.height=h+"px";
   const x=cv.getContext("2d");x.scale(dpr,dpr);
-  const padR=58,padB=44,padT=8,cw=w-padR,chH=h-padB-padT,vh=30;
+  const cw=w-padR;
   const hi=Math.max(...bars.map(b=>b.h)),lo=Math.min(...bars.map(b=>b.l)),sp=(hi-lo)||1;
   const vmax=Math.max(...bars.map(b=>b.v||0));
   const X=i=>i/(bars.length)*cw+ (cw/bars.length)/2;
-  const Y=v=>padT+(1-(v-lo)/sp)*(chH-vh-6);
+  const Y=v=>padT+(1-(v-lo)/sp)*(priceH-vh-6);
+  const bw=Math.max(1,cw/bars.length*0.62);
+  const poly=(arr,col,lw=1.3,YY=Y)=>{x.strokeStyle=col;x.lineWidth=lw;x.beginPath();let st=false;
+    arr.forEach((v,i)=>{if(v==null)return;const px=X(i),py=YY(v);st?x.lineTo(px,py):(x.moveTo(px,py),st=true)});
+    x.stroke();x.lineWidth=1};
   x.fillStyle="#0b0f15";x.fillRect(0,0,w,h);
-  // grid + right axis
-  x.strokeStyle="#151d28";x.fillStyle="#5b6579";x.font="10px "+getComputedStyle(document.body).fontFamily;
-  x.textAlign="left";
+  x.font="10px "+getComputedStyle(document.body).fontFamily;
+  // grid + right axis (price panel)
+  x.strokeStyle="#151d28";x.fillStyle="#5b6579";x.textAlign="left";
   for(let g=0;g<=4;g++){const v=lo+sp*g/4,y=Y(v);
     x.beginPath();x.moveTo(0,y);x.lineTo(cw,y);x.stroke();
     x.fillText(fmt(v,pxd(sym)),cw+6,y+3)}
@@ -606,27 +634,48 @@ function drawChart(sym){
   x.textAlign="center";
   for(let g=0;g<=4;g++){const i=Math.min(bars.length-1,Math.round(g/4*(bars.length-1)));
     x.fillText(bars[i].t.slice(2),X(i),h-padB+16)}
-  // volume
-  const bw=Math.max(1,cw/bars.length*0.62);
+  // volume (bottom of price panel)
   bars.forEach((b,i)=>{const vhpx=vmax>0?((b.v||0)/vmax)*vh:0;
     x.fillStyle=b.c>=b.o?"rgba(39,209,127,.28)":"rgba(255,80,99,.28)";
-    x.fillRect(X(i)-bw/2,padT+chH-vhpx,bw,vhpx)});
+    x.fillRect(X(i)-bw/2,padT+priceH-vhpx,bw,vhpx)});
+  // Bollinger band fill (behind candles)
+  if(I.bb){const bb=bollArr(cs,20,2);poly(bb.up,"rgba(120,180,255,.55)",1);
+    poly(bb.lo,"rgba(120,180,255,.55)",1);poly(bb.mid,"rgba(120,180,255,.30)",1);}
   // candles
   bars.forEach((b,i)=>{const up=b.c>=b.o,col=up?"#27d17f":"#ff5063";
     x.strokeStyle=col;x.beginPath();x.moveTo(X(i),Y(b.h));x.lineTo(X(i),Y(b.l));x.stroke();
     x.fillStyle=col;const y1=Y(Math.max(b.o,b.c)),y2=Y(Math.min(b.o,b.c));
     x.fillRect(X(i)-bw/2,y1,bw,Math.max(1,y2-y1))});
-  // SMA overlays
-  if(S.showSMA){const cs=bars.map(b=>b.c);
-    [[smaArr(cs,20),"#58a6ff"],[smaArr(cs,100),"#ffb200"]].forEach(([arr,col])=>{
-      x.strokeStyle=col;x.lineWidth=1.3;x.beginPath();let started=false;
-      arr.forEach((v,i)=>{if(v==null)return;const px=X(i),py=Y(v);
-        started?x.lineTo(px,py):(x.moveTo(px,py),started=true)});x.stroke()});x.lineWidth=1}
+  // moving-average overlays
+  if(S.showSMA){poly(smaArr(cs,20),"#58a6ff");poly(smaArr(cs,100),"#ffb200");}
+  if(I.ema){poly(emaArr(cs,21),"#c792ea");}
   // last price line
   const last=bars[bars.length-1].c;x.strokeStyle="rgba(255,178,0,.6)";x.setLineDash([4,4]);
   x.beginPath();x.moveTo(0,Y(last));x.lineTo(cw,Y(last));x.stroke();x.setLineDash([]);
   x.fillStyle="#ffb200";x.textAlign="left";x.fillText(fmt(last,pxd(sym)),cw+6,Y(last)+3);
-  CH={bars,X,Y,cw,chH,padT,sym};
+  // oscillator panes (RSI / MACD) below the price panel
+  let oy=padT+priceH+paneGap;
+  panes.forEach(p=>{
+    x.strokeStyle="#151d28";x.beginPath();x.moveTo(0,oy-4);x.lineTo(cw,oy-4);x.stroke();
+    if(p==="rsi"){
+      const r=rsiArr(cs,14),YR=v=>oy+(1-v/100)*paneH;
+      [30,50,70].forEach(g=>{x.strokeStyle="#1a2230";x.setLineDash(g===50?[]:[3,3]);
+        x.beginPath();x.moveTo(0,YR(g));x.lineTo(cw,YR(g));x.stroke();x.setLineDash([]);
+        x.fillStyle="#5b6579";x.textAlign="left";x.fillText(g,cw+6,YR(g)+3)});
+      poly(r,"#c792ea",1.3,YR);
+      x.fillStyle="#8b93a7";x.fillText("RSI 14",4,oy+11);
+    } else {
+      const M=macdArr(cs);const mx=Math.max(1e-9,...[...M.macd,...M.signal].filter(v=>v!=null).map(Math.abs));
+      const YM=v=>oy+paneH/2-(v/mx)*(paneH/2-4);
+      x.strokeStyle="#1a2230";x.beginPath();x.moveTo(0,YM(0));x.lineTo(cw,YM(0));x.stroke();
+      M.hist.forEach((v,i)=>{if(v==null)return;x.fillStyle=v>=0?"rgba(39,209,127,.5)":"rgba(255,80,99,.5)";
+        const y0=YM(0),y1=YM(v);x.fillRect(X(i)-bw/2,Math.min(y0,y1),bw,Math.max(1,Math.abs(y1-y0)))});
+      poly(M.macd,"#58a6ff",1.3,YM);poly(M.signal,"#ffb200",1.3,YM);
+      x.fillStyle="#8b93a7";x.textAlign="left";x.fillText("MACD 12,26,9",4,oy+11);
+    }
+    oy+=paneH+paneGap;
+  });
+  CH={bars,X,Y,cw,chH:priceH,padT,sym};
 }
 function chartHover(ev){
   if(!CH)return;const cv=$("#chart"),r=cv.getBoundingClientRect();
@@ -757,9 +806,9 @@ function vSecurity(){
     <span class="right"><span class="seg" id="tfseg">
       ${[["65","3M"],["130","6M"],["252","1Y"],["380","ALL"]].map(([v,l])=>
         `<button data-tf="${v}" class="${S.tf==+v?"on":""}">${l}</button>`).join("")}</span>
-      <button class="btn tiny ${S.showSMA?"":""}" id="smabtn">${S.showSMA?"SMA ✓":"SMA"}</button></span></div>
+      <button class="btn tiny" data-ind="sma">${S.showSMA?"SMA ✓":"SMA"}</button><button class="btn tiny" data-ind="ema">${S.ind.ema?"EMA ✓":"EMA"}</button><button class="btn tiny" data-ind="bb">${S.ind.bb?"BB ✓":"BB"}</button><button class="btn tiny" data-ind="rsi">${S.ind.rsi?"RSI ✓":"RSI"}</button><button class="btn tiny" data-ind="macd">${S.ind.macd?"MACD ✓":"MACD"}</button></span></div>
     <div id="chartwrap"><canvas id="chart"></canvas><div id="xhair"></div></div>
-    <div class="note"><span style="color:#58a6ff">■</span> SMA20 · <span style="color:#ffb200">■</span> SMA100 · drag/hover for OHLC</div></div>
+    <div class="note"><span style="color:#58a6ff">■</span> SMA20 · <span style="color:#ffb200">■</span> SMA100 · <span style="color:#c792ea">■</span> EMA21/RSI · <span style="color:#58a6ff">■</span> Bollinger(20,2) · MACD(12,26,9) — toggle above · drag/hover for OHLC</div></div>
 
   <div class="cols"><div>
   <div class="panel"><div class="ph">Statistics · DES</div><div class="pb grid3">
@@ -1012,7 +1061,8 @@ function render(scroll){
     drawSpark(cv,q.spark,q.spark.at(-1)>=q.spark[0])});
   if(S.page==="security"){drawChart(S.sym);
     const cv=$("#chart");cv.onpointermove=chartHover;cv.onpointerleave=()=>$("#xhair").style.display="none";
-    $("#smabtn").onclick=()=>{S.showSMA=!S.showSMA;render()};
+    $$("[data-ind]").forEach(b=>b.onclick=()=>{const k=b.dataset.ind;
+      if(k==="sma")S.showSMA=!S.showSMA;else S.ind[k]=!S.ind[k];render()});
     $$("#tfseg button").forEach(b=>b.onclick=()=>{S.tf=+b.dataset.tf;render()});
     $$("[data-tside]").forEach(b=>b.onclick=()=>{S.ticket.side=b.dataset.tside;syncTicket();render()});
     $$("[data-ttype]").forEach(b=>b.onclick=()=>{S.ticket.type=b.dataset.ttype;S.ticket.lp=null;syncTicket();render()});
@@ -1075,7 +1125,7 @@ function runCmd(raw){
   if(c==="KILL"){killSwitch();return}
   if(c==="POSTURE"&&parts[1]&&POSTURE_STATS[parts[1]]){applyPosture(parts[1],true);return}
   if(POSTURE_STATS[c]){applyPosture(c,true);return}
-  if(c==="HELP"){toast("TICKER · TICKER GP/DES · POS · RISK · AGT · STRAT · BUY/SELL SYM QTY [LMT px] · POSTURE SURVIVAL|BALANCED|AGGRESSIVE · KILL");return}
+  if(c==="HELP"){toast("Type ANY ticker to search & open it: TSLA · SPY · NVDA · SOL/USD · DOGE/USD (US equities/ETFs & crypto, live via the venue). Also: POS · RISK · AGT · STRAT · BUY/SELL SYM QTY [LMT px] · POSTURE SURVIVAL|BALANCED|AGGRESSIVE · KILL");return}
   if(parts[0]==="BUY"||parts[0]==="SELL"){
     const sym=normSym(parts[1]);if(!sym){toast("Unknown symbol "+parts[1],"err");return}
     const qty=parseFloat(parts[2]);
@@ -1084,7 +1134,23 @@ function runCmd(raw){
   if(c in nav1&&nav1[c]){nav(nav1[c]);return}
   const sym=normSym(parts[0]);
   if(sym){S.tf=380;S.ticket={side:"buy",type:"market"};nav("security",sym);return}
+  // unknown single token that looks like a ticker → search the venue for it
+  if(parts.length===1&&/^[A-Z0-9][A-Z0-9/.\-]{0,11}$/.test(parts[0])){resolveSym(parts[0]);return}
   toast("Unknown command — HELP for the list","err");
+}
+async function resolveSym(query){
+  if(S.mode!=="live"){toast("ticker search needs the live server","err");return}
+  toast("searching “"+query+"” on the venue…");
+  try{
+    const r=await j("/api/resolve?q="+encodeURIComponent(query));
+    const row=r.row;
+    META[row.symbol]={name:row.name,cls:row.cls,tradable:row.tradable};
+    S.quotes[row.symbol]={last:row.last,prevClose:row.last-row.chg,spark:row.spark};
+    const h=await j("/api/history/"+encodeURIComponent(row.symbol)).catch(()=>null);
+    if(h&&h.bars){S.bars[row.symbol]=h.bars;FULL[row.symbol]=h.bars;}
+    S.tf=380;S.ticket={side:"buy",type:"market"};nav("security",row.symbol);
+    toast((r.added?"added ":"")+row.symbol+" — "+row.cls,"ok");
+  }catch(e){toast(e.detail||("not found: "+query),"err");}
 }
 function normSym(s){if(!s)return null;s=s.toUpperCase();
   if(S.quotes[s])return s;
