@@ -1,0 +1,30 @@
+==============================================================================
+PART A — synthetic universe (known edge): does trade selection help,
+         out-of-sample, net of all fees?
+==============================================================================
+fees charged per side: commission 0 bps + half-spread 2 bps + slippage 1 bps  (round trip 0.06%)
+
+--- MOMENTUM (SMA 20/100 cross, triple-barrier exits) ---
+train events: 62   |  P(win) threshold learned on train OOF only: 0.75
+TEST WINDOW (30% held out)            trades    win rate (net)     avg win (net)    avg loss (net)  expectancy/trade     profit factor            Sharpe           Sortino            max DD               DSR
+BASE (all signals)                  46             58.7%            +4.57%            -5.24%           +0.518%              1.24              1.22              1.10             -3.0%             0.979
+AGENT-SELECTED                      37             62.2%            +4.52%            -4.76%           +1.005%              1.56              2.33              2.12             -2.4%             1.000
+selection lift: win rate 58.7% -> 62.2%, expectancy +0.518% -> +1.005% per trade (net of fees), taking 37/46 candidates
+
+--- MEAN REVERSION (RSI-2 dip in uptrend) ---
+train events: 270   |  P(win) threshold learned on train OOF only: 0.55
+TEST WINDOW (30% held out)            trades    win rate (net)     avg win (net)    avg loss (net)  expectancy/trade     profit factor            Sharpe           Sortino            max DD               DSR
+BASE (all signals)                 127             62.2%            +2.61%            -3.41%           +0.337%              1.26              1.02              0.97             -2.9%             0.956
+AGENT-SELECTED                      86             70.9%            +2.34%            -3.17%           +0.738%              1.80              2.18              1.60             -1.1%             0.999
+selection lift: win rate 62.2% -> 70.9%, expectancy +0.337% -> +0.738% per trade (net of fees), taking 86/127 candidates
+
+==============================================================================
+PART B — real data, $0: 10-month SMA timing on the S&P 500, 1871->now
+         (free Shiller dataset), 5 bps per side on every switch
+==============================================================================
+buy & hold             CAGR  9.36%   Sharpe  0.71   maxDD  -81.8%
+SMA-10 timing (net)    CAGR  9.34%   Sharpe  0.99   maxDD  -46.3%
+round trips: 105   win rate (net) 61.0%   avg win +29.57%   avg loss -2.90%   expectancy +16.89%/trade   profit factor 15.94
+DSR 1.000 -> LIKELY REAL EDGE — proceed to paper trading
+note: the timing rule's value is the drawdown cut at similar CAGR — the
+Calmar view — exactly why single metrics (incl. win rate) mislead alone.

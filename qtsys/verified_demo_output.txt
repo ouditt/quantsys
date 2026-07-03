@@ -1,0 +1,32 @@
+==============================================================================
+PART A — REAL cross-asset daily universe: WTI, Brent, NatGas (1986/87/97->),
+         BTC, ETH (2010/15->), 6 FX majors (1971/99->). Agent trade-
+         selection: does it help, out-of-sample, net of per-class fees?
+==============================================================================
+fees per side by class: commodities 5 bps | crypto 15 bps | FX 1.5 bps   |   train < 2013-05-29 <= test
+
+--- MOMENTUM (SMA 20/100 cross, triple-barrier exits) ---
+train events: 802  |  P(win) threshold learned on train OOF only: 0.57
+TEST WINDOW (~30% held out)           trades   win rate (net)    avg win (net)   avg loss (net) expectancy/trade    profit factor      Sharpe(M2M)           max DD       DSR(trade)
+BASE (all signals)                441            52.6%           +4.93%           -6.48%          -0.478%             0.84            -0.27           -29.8%            0.182
+AGENT-SELECTED                    122            53.3%           +4.25%           -4.07%          +0.361%             1.19             0.16            -7.6%            0.733
+selection: win rate 52.6% -> 53.3%, expectancy -0.478% -> +0.361%/trade net, taking 122/441 candidates
+verdict on AGENT-SELECTED: LIKELY NOISE/OVERFIT — do not deploy; more tuning makes it worse
+
+--- MEAN REVERSION (RSI-2 dip in uptrend) ---
+train events: 1773  |  P(win) threshold learned on train OOF only: 0.53
+TEST WINDOW (~30% held out)           trades   win rate (net)    avg win (net)   avg loss (net) expectancy/trade    profit factor      Sharpe(M2M)           max DD       DSR(trade)
+BASE (all signals)                853            51.5%           +4.13%           -3.79%          +0.287%             1.16             0.30           -20.9%            0.880
+AGENT-SELECTED                    317            56.5%           +6.40%           -6.20%          +0.917%             1.34             0.51           -13.7%            0.955
+selection: win rate 51.5% -> 56.5%, expectancy +0.287% -> +0.917%/trade net, taking 317/853 candidates
+verdict on AGENT-SELECTED: LIKELY REAL EDGE — proceed to paper trading
+
+==============================================================================
+PART B — real S&P 500, 1871->now: 10-month SMA timing, 5 bps/side on switches
+==============================================================================
+buy & hold             CAGR  9.36%   Sharpe  0.71   maxDD  -81.8%
+SMA-10 timing (net)    CAGR  9.34%   Sharpe  0.99   maxDD  -46.3%
+round trips: 105   win rate (net) 61.0%   avg win +29.57%   avg loss -2.90%   expectancy +16.89%/trade   profit factor 15.94
+DSR(trade-level) 1.000
+value here = drawdown cut (-82% -> -46%) at similar CAGR; no single
+metric — win rate included — tells the whole story.

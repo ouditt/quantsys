@@ -1,0 +1,9 @@
+# secrets — never commit broker keys
+.env
+*.key
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/

@@ -1,0 +1,12 @@
+==============================================================================
+QTSYS VALIDATION SUITE — proving the engine is honest at $0 cost
+==============================================================================
+T1 PASS  fee accounting exact: 11 trades on a flat series lose exactly 0.2000% each (the round-trip fee)
+T2 PASS  no look-ahead: removing the future leaves all 5 earlier signals and every feature value unchanged
+T3 PASS  QC gates refuse all 3 injected defects (negative price, duplicate timestamp, high<low)
+T4 PASS  purged CV: 54 train/test pairs checked, zero lifespan overlaps (embargo respected)
+T5 PASS  known edge recovered: expectancy +0.644%/trade net (win rate 66.2%); with 10x fees it drops to -0.496% — fees provably flow through to P&L
+T6       pure-noise sweep: best of 16 configs shows in-sample Sharpe 1.65 (147 trades) — tempting…
+T6 PASS  …but Deflated Sharpe = 0.671 → LIKELY NOISE/OVERFIT — do not deploy; more tuning makes it worse
+------------------------------------------------------------------------------
+ALL TESTS PASSED — machinery is fee-exact, leak-free, and rejects luck.
