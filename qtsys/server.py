@@ -269,12 +269,7 @@ async def news(sym: str):
     vsym = sym if vmap is None else vmap.get(sym)
     items: list[dict] = []
     if hasattr(broker, "news") and vsym:          # venue feed (Alpaca)
-        from .sentiment import score
-        a = await asyncio.to_thread(broker.news, vsym, 25)
-        for it in a:
-            it["sentiment"], it["sent_score"] = score(
-                it.get("headline", "") + " " + it.get("summary", ""))
-        items += a
+        items += await asyncio.to_thread(broker.news, vsym, 25)
     from . import intel                            # yfinance / Yahoo feed
     items += await asyncio.to_thread(intel.news, sym, cls)
     seen, merged = set(), []                       # dedupe on headline, newest first
@@ -283,7 +278,33 @@ async def news(sym: str):
         if k and k not in seen:
             seen.add(k)
             merged.append(it)
-    return {"symbol": sym, "items": merged[:30]}
+    merged = merged[:30]
+    # uniform sentiment tags (FinBERT if available, else lexicon)
+    from . import nlp
+    tags = await asyncio.to_thread(
+        nlp.tag, [it.get("headline", "") + " " + it.get("summary", "") for it in merged])
+    for it, tg in zip(merged, tags):
+        it.update(tg)
+    return {"symbol": sym, "items": merged, "engine": nlp.engine(),
+            "narrative": await _news_narrative(sym, merged)}
+
+
+_NARR_CACHE: dict = {}
+
+
+async def _news_narrative(sym: str, items: list[dict]) -> str:
+    """LLM synthesis of the headlines — cached per symbol for 10 min."""
+    llm = getattr(state.get("daemon"), "llm_fn", None)
+    if not llm or not items:
+        return ""
+    hit = _NARR_CACHE.get(sym)
+    if hit and time.time() - hit[0] < 600:
+        return hit[1]
+    from . import nlp
+    txt = await asyncio.to_thread(nlp.narrative, sym,
+                                  [it.get("headline", "") for it in items], llm)
+    _NARR_CACHE[sym] = (time.time(), txt)
+    return txt
 
 
 @app.get("/api/fundamentals")

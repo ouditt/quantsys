@@ -346,7 +346,7 @@ const S={
  account:{equity:0,cash:0,buying_power:0,day_pnl:0,total_pnl:0,gross_exposure:0,net_exposure:0,leverage:0,drawdown:0},
  halted:false, peak:0,
  agents:{master:true,list:[]}, alog:[],
- news:[], assetNews:{}, fund:{}, ticket:{side:"buy",type:"market"},
+ news:[], assetNews:{}, assetNarr:{}, newsEngine:"", fund:{}, ticket:{side:"buy",type:"market"},
  strategies:{asof:null,rows:[]}, stratOpen:null,
  reports:[], reportOpen:null, reportText:"", journalText:"",
 };
@@ -1011,22 +1011,29 @@ async function loadFund(s){
 function renderNews(s){
   const items=S.assetNews[s];
   if(items===undefined)return `<div class="pb mut">loading headlines…</div>`;
+  const narr=S.assetNarr[s];
+  const narrHtml=narr?`<div class="pb" style="border-bottom:1px dashed var(--line);font-size:11.5px;line-height:1.6">
+    <span class="pill" style="border-color:var(--amber);color:var(--amber)">AI READ</span> ${esc(narr)}</div>`:"";
+  const body=(()=>{
   if(items&&items.length)return items.map(n=>{
     const tm=n.ts?new Date(n.ts):null;const when=tm?tm.toISOString().slice(5,16).replace("T"," "):"";
     const sc=n.sentiment||"neu",lbl=sc==="pos"?"POS":sc==="neg"?"NEG":"NEU";
     const pc=sc==="pos"?"up":sc==="neg"?"dn":"";
     return `<a class="logline nl"${n.url?` href="${esc(n.url)}" target="_blank" rel="noopener"`:""}>
-      <span class="t">${when}</span><span class="m"><span class="pill ${pc}" title="finance-lexicon sentiment (score ${n.sent_score??0})">${lbl}</span> ${esc(n.headline)}
+      <span class="t">${when}</span><span class="m"><span class="pill ${pc}" title="${(n.engine||'lexicon')} sentiment (score ${n.sent_score??0})">${lbl}</span> ${esc(n.headline)}
       ${n.source?`<span class="src">${esc(n.source)}</span>`:""}</span></a>`}).join("");
   const der=S.news.filter(n=>n.syms.includes(s));
   if(der.length)return der.map(n=>`<div class="logline"><span class="t">${n.t.toTimeString().slice(0,5)}</span>
     <span class="m">${esc(n.h)} <span class="pill ${n.s>0?"up":n.s<0?"dn":""}">${n.s>0?"POS":n.s<0?"NEG":"NEU"}</span></span></div>`).join("");
   return `<div class="pb mut">No headlines for ${s} on this venue — commodities, FX and index symbols have no news feed here.</div>`;
+  })();
+  return narrHtml+body;
 }
 async function loadNews(s){
   if(S.mode!=="live"||S.assetNews[s]!==undefined||S._nloading.has(s))return;
   S._nloading.add(s);
-  try{const r=await j("/api/news?sym="+encodeURIComponent(s));S.assetNews[s]=r.items||[]}
+  try{const r=await j("/api/news?sym="+encodeURIComponent(s));S.assetNews[s]=r.items||[];
+    S.assetNarr[s]=r.narrative||"";S.newsEngine=r.engine||"";}
   catch(e){S.assetNews[s]=[]}
   S._nloading.delete(s);
   if(S.page==="security"&&S.sym===s){
