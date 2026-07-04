@@ -172,9 +172,11 @@ async def boot() -> None:
             state["uscan"] = {"running": False, "progress": "done", "result": last}
     except Exception:
         pass
+    _load_alerts()
     asyncio.create_task(_tick_loop())
     asyncio.create_task(_daily_scan_loop())      # auto-run the morning scan daily
     asyncio.create_task(_prewarm_screener())     # warm the fundamentals cache
+    asyncio.create_task(_alerts_loop())          # evaluate alerts continuously
 
 
 async def _tick_loop() -> None:
@@ -314,6 +316,112 @@ async def _news_narrative(sym: str, items: list[dict]) -> str:
                                   [it.get("headline", "") for it in items], llm)
     _NARR_CACHE[sym] = (time.time(), txt)
     return txt
+
+
+_ALERTS_FILE = os.path.join(HERE, "universe_cache", "alerts.json")
+_ALERT_TYPES = {"price_above", "price_below", "change_above", "rsi_above", "rsi_below"}
+
+
+def _rsi(closes, n=14):
+    if len(closes) < n + 1:
+        return None
+    d = [closes[i] - closes[i - 1] for i in range(len(closes) - n, len(closes))]
+    g = sum(x for x in d if x > 0) / n
+    l = -sum(x for x in d if x < 0) / n
+    return 100.0 if l == 0 else 100 - 100 / (1 + g / l)
+
+
+def _eval_alert(a):
+    sym = a["symbol"]
+    q = state["daemon"].context["quotes"].get(sym, {})
+    last, chg, val, typ = q.get("last"), q.get("chg_pct"), a["value"], a["type"]
+    if last is None:
+        return False, None
+    if typ == "price_above" and last >= val:
+        return True, f"{sym} {last:.2f} ≥ {val:g}"
+    if typ == "price_below" and last <= val:
+        return True, f"{sym} {last:.2f} ≤ {val:g}"
+    if typ == "change_above" and chg is not None and abs(chg) >= val:
+        return True, f"{sym} moved {chg:+.2f}% (≥{val:g}%)"
+    if typ in ("rsi_above", "rsi_below"):
+        r = _rsi([b["c"] for b in state["hist"].get(sym, [])])
+        if r is None:
+            return False, None
+        if typ == "rsi_above" and r >= val:
+            return True, f"{sym} RSI {r:.0f} ≥ {val:g}"
+        if typ == "rsi_below" and r <= val:
+            return True, f"{sym} RSI {r:.0f} ≤ {val:g}"
+    return False, None
+
+
+def _save_alerts():
+    import json
+    try:
+        with open(_ALERTS_FILE, "w") as f:
+            json.dump(state.get("alerts", []), f)
+    except Exception:
+        pass
+
+
+def _load_alerts():
+    import json
+    try:
+        with open(_ALERTS_FILE) as f:
+            state["alerts"] = json.load(f)
+    except Exception:
+        state["alerts"] = []
+
+
+async def _alerts_loop():
+    await asyncio.sleep(15)
+    while True:
+        try:
+            feed = state.setdefault("alert_feed", [])
+            for a in state.get("alerts", []):
+                if not a.get("armed", True):
+                    continue
+                fired, msg = _eval_alert(a)
+                if fired and time.time() - a.get("last_fired", 0) > 300:  # 5-min debounce
+                    a["last_fired"] = time.time()
+                    feed.insert(0, {"ts": time.time(), "id": a["id"],
+                                    "message": msg, "symbol": a["symbol"]})
+                    del feed[100:]
+                    state["daemon"].log("Alerts", "🔔 " + msg, "warn")
+        except Exception:
+            pass
+        await asyncio.sleep(8)
+
+
+@app.get("/api/alerts")
+def alerts_list():
+    return {"rules": state.get("alerts", []), "feed": state.get("alert_feed", [])}
+
+
+@app.post("/api/alerts")
+def alerts_create(body: dict):
+    import uuid
+    typ = body.get("type")
+    sym = str(body.get("symbol", "")).upper().strip()
+    if typ not in _ALERT_TYPES or not sym:
+        raise HTTPException(400, "need a valid type and symbol")
+    if sym not in state["hist"]:                 # resolve so the tick loop quotes it
+        try:
+            resolve(sym)
+        except Exception:
+            pass
+    a = {"id": uuid.uuid4().hex[:8], "type": typ, "symbol": sym,
+         "value": float(body.get("value", 0)), "note": body.get("note", ""),
+         "armed": True, "created": time.time(), "last_fired": 0}
+    state.setdefault("alerts", []).append(a)
+    _save_alerts()
+    return a
+
+
+@app.delete("/api/alerts/{aid}")
+def alerts_delete(aid: str):
+    state["alerts"] = [a for a in state.get("alerts", []) if a["id"] != aid]
+    _save_alerts()
+    return {"ok": True}
 
 
 @app.get("/api/screen")

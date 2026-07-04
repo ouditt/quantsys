@@ -356,6 +356,7 @@ const S={
  options:null, optionsFor:null, optExp:"", calendar:null,
  screen:null, screenPreset:"all", screenSort:{col:"market_cap",dir:-1},
  screenFilters:{peMax:null,mcapMin:null,revMin:null,marginMin:null,divMin:null,sector:""},
+ alerts:null, alertForm:{symbol:"",type:"price_above",value:""},
  strategies:{asof:null,rows:[]}, stratOpen:null,
  audit:{results:[],universe:[],strategies:[]}, auditStrat:"", auditAsset:"", auditAgent:"",
  uni:{running:false,progress:"",last:null,selector:null}, uniResults:[], uniInstruments:[],
@@ -581,6 +582,13 @@ async function liveRefresh(full){
     const lg=await j("/api/agents/log?limit=80").catch(()=>null);
     if(lg)S.alog=lg.map(x=>({ts:x.ts,agent:x.agent,level:x.level,message:x.message}));
     const f=await j("/api/fills").catch(()=>null);if(f)S.fills=f;
+    j("/api/alerts").then(al=>{
+      if(!S._alertInit){S._alertInit=true;S._alertSeen=al.feed.length;}
+      else if(al.feed.length>S._alertSeen){
+        al.feed.slice(0,al.feed.length-S._alertSeen).forEach(x=>toast("🔔 "+x.message,"warn"));}
+      S._alertSeen=al.feed.length;S.alerts=al;
+      if(S.page==="alerts"&&document.activeElement.tagName!=="INPUT")render();
+    }).catch(()=>{});
     if(!S._tkTs||Date.now()-S._tkTs>15000){S._tkTs=Date.now();
       j("/api/tracking").then(T=>{if(T&&T.backtest)renderTracking(T)}).catch(()=>{});}
     if(full){for(const s of Object.keys(S.quotes)){
@@ -879,7 +887,7 @@ async function toggleAgent(name,enabled){
 }
 
 /* ============================================================ views */
-const TABS=[["markets","MKT"],["portfolio","PORT"],["risk","RISK"],["calendar","CAL"],["screen","SCREEN"],["agents","AGENTS"],["strats","STRAT"],["universe","UNIVERSE"],["audit","AUDIT"],["journal","JOURNAL"]];
+const TABS=[["markets","MKT"],["portfolio","PORT"],["risk","RISK"],["calendar","CAL"],["screen","SCREEN"],["alerts","ALERTS"],["agents","AGENTS"],["strats","STRAT"],["universe","UNIVERSE"],["audit","AUDIT"],["journal","JOURNAL"]];
 function nav(page,sym){S.page=page;S.sym=sym??S.sym;
   location.hash=page==="security"?`/sec/${S.sym}`:`/${page}`;
   render();$("#view").scrollTop=0}
@@ -1320,6 +1328,44 @@ function vStrats(){
     T7 broker adapters verified offline
   </div></div>`;
 }
+const ALERT_TYPES=[["price_above","price ≥"],["price_below","price ≤"],
+  ["change_above","|Δ%| ≥"],["rsi_above","RSI ≥"],["rsi_below","RSI ≤"]];
+function vAlerts(){
+  const a=S.alerts||{rules:[],feed:[]}, f=S.alertForm;
+  const rules=(a.rules||[]).length?a.rules.map(r=>{const tl=(ALERT_TYPES.find(t=>t[0]===r.type)||[])[1]||r.type;
+    return `<tr><td><span class="sym" data-resolve="${esc(r.symbol)}">${esc(r.symbol)}</span></td>
+      <td>${tl} <b>${r.value}</b></td>
+      <td class="mut">${r.last_fired?"fired "+ago(r.last_fired):"armed"}</td>
+      <td><button class="btn tiny danger" data-delalert="${r.id}">×</button></td></tr>`}).join("")
+    :`<tr><td colspan="4" class="mut">no alerts yet — add one above</td></tr>`;
+  const feed=(a.feed||[]).length?a.feed.map(x=>`<div class="logline">
+    <span class="t">${new Date(x.ts*1000).toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"})}</span>
+    <span class="m">🔔 <span class="sym" data-resolve="${esc(x.symbol)}">${esc(x.symbol)}</span> ${esc(x.message.replace(x.symbol,"").trim())}</span></div>`).join("")
+    :`<div class="pb mut">no alerts triggered yet</div>`;
+  return `
+  <div class="panel"><div class="ph">New alert</div><div class="pb" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+    <input id="alSym" class="asel" placeholder="symbol" value="${esc(f.symbol)}" style="width:90px;text-transform:uppercase">
+    <select id="alType" class="asel">${ALERT_TYPES.map(([v,l])=>`<option value="${v}"${f.type===v?" selected":""}>${l}</option>`).join("")}</select>
+    <input id="alVal" class="asel" type="number" placeholder="value" value="${esc(f.value)}" style="width:80px">
+    <button class="btn" id="alAdd">+ Add alert</button>
+    <span class="mut" style="font-size:10.5px">evaluated server-side on any page · 5-min debounce · symbol resolved live</span></div></div>
+  <div class="cols"><div>
+    <div class="panel"><div class="ph">Alert rules <span class="right mut">${(a.rules||[]).length}</span></div>
+      <table><thead><tr><th>Symbol</th><th>Condition</th><th>Status</th><th></th></tr></thead><tbody>${rules}</tbody></table></div>
+  </div><div>
+    <div class="panel"><div class="ph">Triggered <span class="right mut">${(a.feed||[]).length}</span></div>
+      <div style="max-height:52vh;overflow:auto">${feed}</div></div>
+  </div></div>`;
+}
+async function addAlert(){
+  const f=S.alertForm;
+  if(!f.symbol||f.value===""){toast("symbol and value required","err");return}
+  try{await j("/api/alerts",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({symbol:f.symbol,type:f.type,value:parseFloat(f.value)})});
+    S.alertForm={symbol:"",type:f.type,value:""};toast("alert armed for "+f.symbol,"ok");pollAlerts();}
+  catch(e){toast(e.detail||"failed to add alert","err")}
+}
+async function pollAlerts(){try{S.alerts=await j("/api/alerts");if(S.page==="alerts")render()}catch(e){}}
 const SCREEN_PRESETS={all:{},value:{peMax:20},growth:{revMin:20},
   quality:{marginMin:20},dividend:{divMin:1.5}};
 function screenRows(){
@@ -1564,7 +1610,7 @@ function fxOpen(){const d=new Date(),u=d.getUTCDay(),h=d.getUTCHours();
 
 /* ============================================================ render */
 const VIEWS={markets:vMarkets,security:vSecurity,portfolio:vPortfolio,
-  risk:vRisk,agents:vAgents,strats:vStrats,universe:vUniverse,audit:vAudit,journal:vJournals,industry:vIndustry,options:vOptions,calendar:vCalendar,screen:vScreen};
+  risk:vRisk,agents:vAgents,strats:vStrats,universe:vUniverse,audit:vAudit,journal:vJournals,industry:vIndustry,options:vOptions,calendar:vCalendar,screen:vScreen,alerts:vAlerts};
 function render(scroll){
   // header
   $("#modechip").className="chip "+(S.mode==="live"?"live":"demo");
@@ -1613,6 +1659,14 @@ function render(scroll){
     const fs=$("#fltStrat");if(fs)fs.onchange=()=>{S.auditStrat=fs.value;render()};
     const fa=$("#fltAsset");if(fa)fa.onchange=()=>{S.auditAsset=fa.value;render()};
     $$("[data-agent-filter]").forEach(b=>b.onclick=()=>{S.auditAgent=b.dataset.agentFilter;render()});
+  }
+  if(S.page==="alerts"){
+    const as=$("#alSym");if(as)as.oninput=()=>S.alertForm.symbol=as.value.toUpperCase();
+    const at=$("#alType");if(at)at.onchange=()=>S.alertForm.type=at.value;
+    const av=$("#alVal");if(av)av.oninput=()=>S.alertForm.value=av.value;
+    const aa=$("#alAdd");if(aa)aa.onclick=addAlert;
+    $$("[data-delalert]").forEach(b=>b.onclick=async()=>{
+      await j("/api/alerts/"+b.dataset.delalert,{method:"DELETE"}).catch(()=>{});pollAlerts()});
   }
   if(S.page==="screen"){
     $$("[data-preset]").forEach(b=>b.onclick=()=>{S.screenPreset=b.dataset.preset;
