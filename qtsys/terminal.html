@@ -364,9 +364,10 @@ const S={
  reports:[], reportOpen:null, reportText:"", journalText:"",
  dataFields:null, dataSyms:"AAPL, MSFT, NVDA, BTC/USD",
  dataSel:["last","chg_pct","rsi14","mom_252","pe","sector"], dataRows:null, dataBusy:false,
+ launch:null, _lpdrag:null,
 };
 S.filings={}; S.filingSum={};
-S._nloading=new Set();S._floading=new Set();S._flgloading=new Set();
+S._nloading=new Set();S._floading=new Set();S._flgloading=new Set();S._lpload=new Set();
 try{Object.assign(S.p,JSON.parse(localStorage.getItem("qtsys_params")||"{}"))}catch(e){}
 const saveParams=()=>{try{localStorage.setItem("qtsys_params",JSON.stringify(S.p))}catch(e){}};
 
@@ -890,7 +891,7 @@ async function toggleAgent(name,enabled){
 }
 
 /* ============================================================ views */
-const TABS=[["markets","MKT"],["portfolio","PORT"],["risk","RISK"],["calendar","CAL"],["screen","SCREEN"],["alerts","ALERTS"],["agents","AGENTS"],["strats","STRAT"],["universe","UNIVERSE"],["data","DATA"],["audit","AUDIT"],["journal","JOURNAL"]];
+const TABS=[["markets","MKT"],["launch","LAUNCH"],["portfolio","PORT"],["risk","RISK"],["calendar","CAL"],["screen","SCREEN"],["alerts","ALERTS"],["agents","AGENTS"],["strats","STRAT"],["universe","UNIVERSE"],["data","DATA"],["audit","AUDIT"],["journal","JOURNAL"]];
 function nav(page,sym){S.page=page;S.sym=sym??S.sym;
   location.hash=page==="security"?`/sec/${S.sym}`:`/${page}`;
   render();$("#view").scrollTop=0}
@@ -1410,6 +1411,162 @@ async function addAlert(){
   catch(e){toast(e.detail||"failed to add alert","err")}
 }
 async function pollAlerts(){try{S.alerts=await j("/api/alerts");if(S.page==="alerts")render()}catch(e){}}
+/* ============================================================ LAUNCHPAD */
+const LP_TYPES=[["watch","Quote monitor"],["chart","Chart"],["news","News"],
+  ["filings","SEC filings"],["movers","Top movers"],["book","Positions"]];
+const LP_LABEL=Object.fromEntries(LP_TYPES);
+let _lpid=1;
+const lpNewId=()=>"t"+(_lpid++)+Date.now().toString(36).slice(-3);
+function lpDefault(){return {cols:3, tiles:[
+  {id:"w1",type:"watch",span:1,syms:["AAPL","MSFT","NVDA","BTC","EURUSD"]},
+  {id:"c1",type:"chart",span:1,sym:"BTC"},
+  {id:"m1",type:"movers",span:1},
+  {id:"n1",type:"news",span:1,sym:"AAPL"},
+  {id:"f1",type:"filings",span:1,sym:"NVDA"},
+  {id:"b1",type:"book",span:1},
+]};}
+function lpLoad(){try{const s=JSON.parse(localStorage.getItem("qtsys_launch"));
+  if(s&&Array.isArray(s.tiles))return {cols:s.cols||3,tiles:s.tiles};}catch(e){}
+  return lpDefault();}
+function lpSave(){try{localStorage.setItem("qtsys_launch",JSON.stringify(S.launch))}catch(e){}}
+async function lpEnsure(sym){        // seed quote+bars for an off-universe symbol without navigating
+  if(!sym||(S.quotes[sym]&&(S.quotes[sym].spark||[]).length)||S._lpload.has(sym)||S.mode!=="live")return;
+  S._lpload.add(sym);
+  try{const r=await j("/api/resolve?q="+encodeURIComponent(sym));const row=r.row;
+    META[row.symbol]={name:row.name,cls:row.cls,tradable:row.tradable};
+    S.quotes[row.symbol]={last:row.last,prevClose:row.last-row.chg,spark:row.spark};
+    const h=await j("/api/history/"+encodeURIComponent(row.symbol)).catch(()=>null);
+    if(h&&h.bars){S.bars[row.symbol]=h.bars;FULL[row.symbol]=h.bars;}}
+  catch(e){}
+  S._lpload.delete(sym);
+  if(S.page==="launch")render();
+}
+function lpTileBody(t){
+  if(t.type==="watch"){
+    const rows=(t.syms||[]).map(s=>{const q=S.quotes[s];if(!q)return `<tr data-lpwrm="${t.id}|${esc(s)}"><td><span class="sym">${esc(s)}</span></td><td class="mut" colspan="2">resolving…</td><td></td></tr>`;
+      const ch=chgOf(s);return `<tr class="rowlink" data-resolve="${esc(s)}"><td><span class="sym">${esc(s)}</span></td>
+        <td class="num">${fmt(q.last,pxd(s))}</td><td class="num ${cls(ch)}">${pct(ch)}</td>
+        <td style="width:20px"><button class="btn tiny ghost" data-lpwrm="${t.id}|${esc(s)}" title="remove">×</button></td></tr>`}).join("");
+    return `<table><tbody>${rows||`<tr><td class="mut">no symbols</td></tr>`}</tbody></table>
+      <div class="pb"><input class="asel" data-lpwadd="${t.id}" placeholder="+ add symbol" style="width:110px;text-transform:uppercase"></div>`;
+  }
+  if(t.type==="chart"){
+    const s=t.sym,q=S.quotes[s];
+    if(!q||!(q.spark||[]).length)return `<div class="pb mut">tracking ${esc(s||"—")}…</div>`;
+    const ch=chgOf(s);
+    return `<div class="pb" style="cursor:pointer" data-resolve="${esc(s)}">
+      <div style="display:flex;justify-content:space-between;align-items:baseline">
+        <span class="num" style="font-size:18px">${fmt(q.last,pxd(s))}</span>
+        <span class="num ${cls(ch)}">${pct(ch)}</span></div>
+      <canvas class="spark" data-spark="${esc(s)}" style="width:100%;height:70px;margin-top:6px"></canvas></div>`;
+  }
+  if(t.type==="news"){
+    const it=S.assetNews[t.sym];
+    if(it===undefined)return `<div class="pb mut">loading ${esc(t.sym)} headlines…</div>`;
+    if(!it.length)return `<div class="pb mut">no headlines for ${esc(t.sym)}</div>`;
+    return it.slice(0,6).map(n=>{const sc=n.sentiment||"neu",pc=sc==="pos"?"up":sc==="neg"?"dn":"";
+      return `<a class="logline nl"${n.url?` href="${esc(n.url)}" target="_blank" rel="noopener"`:""}>
+        <span class="m"><span class="pill ${pc}">${sc==="pos"?"POS":sc==="neg"?"NEG":"NEU"}</span> ${esc(n.headline)}</span></a>`}).join("");
+  }
+  if(t.type==="filings"){
+    const f=S.filings[t.sym];
+    if(f===undefined)return `<div class="pb mut">loading ${esc(t.sym)} filings…</div>`;
+    if(!f.items||!f.items.length)return `<div class="pb mut">no SEC filings for ${esc(t.sym)}</div>`;
+    return f.items.slice(0,6).map(x=>`<a class="logline nl" href="${esc(x.url)}" target="_blank" rel="noopener">
+      <span class="t">${esc(x.date)}</span><span class="m"><span class="pill ${FORM_TAG[x.form]||""}" style="min-width:40px;text-align:center">${esc(x.form)}</span> ${esc(x.title||x.form)}</span></a>`).join("");
+  }
+  if(t.type==="movers"){
+    const ms=Object.keys(S.quotes).filter(s=>S.quotes[s]&&S.quotes[s].prevClose&&META[s])
+      .map(s=>[s,chgOf(s)]).filter(x=>isFinite(x[1])&&x[1]!==0);
+    ms.sort((a,b)=>b[1]-a[1]);
+    const top=ms.slice(0,5),bot=ms.slice(-5).reverse();
+    const line=([s,ch])=>`<tr class="rowlink" data-resolve="${esc(s)}"><td><span class="sym">${esc(s)}</span></td>
+      <td class="num">${fmt(S.quotes[s].last,pxd(s))}</td><td class="num ${cls(ch)}">${pct(ch)}</td></tr>`;
+    return `<table><tbody><tr><td class="mut" colspan="3" style="font-size:10px">▲ GAINERS</td></tr>
+      ${top.map(line).join("")}<tr><td class="mut" colspan="3" style="font-size:10px">▼ LOSERS</td></tr>
+      ${bot.map(line).join("")}</tbody></table>`;
+  }
+  if(t.type==="book"){
+    const a=S.account;
+    const rows=(S.positions||[]).slice(0,8).map(p=>`<tr class="rowlink" data-resolve="${esc(p.symbol)}">
+      <td><span class="sym">${esc(p.symbol)}</span></td><td class="num">${p.qty}</td>
+      <td class="num ${cls(p.unrealized)}">${signed(p.unrealized,0)}</td></tr>`).join("");
+    return `<div class="pb" style="display:flex;justify-content:space-between">
+      <span class="mut">Equity</span><span class="num">${money(a.equity,0)}</span></div>
+      <table><tbody>${rows||`<tr><td class="mut">flat — no positions</td></tr>`}</tbody></table>`;
+  }
+  return `<div class="pb mut">unknown tile</div>`;
+}
+function lpTile(t){
+  const symIn=(t.type==="chart"||t.type==="news"||t.type==="filings")
+    ? `<input class="asel" data-lpsym="${t.id}" value="${esc(t.sym||"")}" style="width:66px;text-transform:uppercase" title="symbol">` : "";
+  return `<div class="panel" style="grid-column:span ${t.span||1}" data-lptile="${t.id}"
+      ondragover="event.preventDefault()">
+    <div class="ph" draggable="true" data-lpdrag="${t.id}" style="cursor:grab">
+      <span>${LP_LABEL[t.type]||t.type}</span>
+      <span class="right" style="display:flex;gap:4px;align-items:center">${symIn}
+        <button class="btn tiny ghost" data-lpspan="${t.id}" title="resize">${(t.span||1)>1?"▭":"▬"}</button>
+        <button class="btn tiny danger" data-lprm="${t.id}" title="remove">×</button></span></div>
+    ${lpTileBody(t)}</div>`;
+}
+function vLaunch(){
+  if(!S.launch)S.launch=lpLoad();
+  const cols=S.launch.cols||3;
+  const tiles=S.launch.tiles.map(lpTile).join("")||`<div class="panel"><div class="pb mut">no tiles — add one above</div></div>`;
+  return `
+  <div class="panel"><div class="pb" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <b>Launchpad</b><span class="mut" style="font-size:10.5px">drag a tile's header to reorder · layout saved to this browser</span>
+    <span class="right"></span>
+    <select id="lpAdd" class="asel"><option value="">+ Add tile…</option>${LP_TYPES.map(([v,l])=>`<option value="${v}">${l}</option>`).join("")}</select>
+    <span class="mut">cols</span>
+    <select id="lpCols" class="asel">${[2,3,4].map(n=>`<option value="${n}"${n===cols?" selected":""}>${n}</option>`).join("")}</select>
+    <button class="btn tiny ghost" id="lpReset">reset</button>
+  </div></div>
+  <div id="lpgrid" style="display:grid;grid-template-columns:repeat(${cols},1fr);gap:10px;align-items:start">${tiles}</div>`;
+}
+function lpBind(){
+  if(!S.launch)S.launch=lpLoad();
+  // lazy-load data + seed off-universe symbols referenced by tiles
+  S.launch.tiles.forEach(t=>{
+    if(t.type==="chart"&&t.sym)lpEnsure(t.sym);
+    if(t.type==="watch")(t.syms||[]).forEach(lpEnsure);
+    if(t.type==="news"&&t.sym){lpEnsure(t.sym);loadNews(t.sym);}
+    if(t.type==="filings"&&t.sym){lpEnsure(t.sym);loadFilings(t.sym);}
+  });
+  const add=$("#lpAdd");if(add)add.onchange=()=>{const v=add.value;if(!v)return;
+    const t={id:lpNewId(),type:v,span:1};
+    if(v==="watch")t.syms=["AAPL"];if(v!=="movers"&&v!=="book"&&v!=="watch")t.sym="AAPL";
+    S.launch.tiles.push(t);lpSave();render()};
+  const cols=$("#lpCols");if(cols)cols.onchange=()=>{S.launch.cols=+cols.value;lpSave();render()};
+  const rst=$("#lpReset");if(rst)rst.onclick=()=>{if(confirm("Reset Launchpad to defaults?")){S.launch=lpDefault();lpSave();render()}};
+  $$("[data-lprm]").forEach(b=>b.onclick=()=>{S.launch.tiles=S.launch.tiles.filter(x=>x.id!==b.dataset.lprm);lpSave();render()});
+  $$("[data-lpspan]").forEach(b=>b.onclick=()=>{const t=S.launch.tiles.find(x=>x.id===b.dataset.lpspan);
+    if(t){t.span=(t.span||1)>1?1:2;lpSave();render()}});
+  $$("[data-lpsym]").forEach(i=>i.onchange=()=>{const t=S.launch.tiles.find(x=>x.id===i.dataset.lpsym);
+    if(t){t.sym=i.value.trim().toUpperCase();lpSave();
+      if(t.type==="news")S.assetNews[t.sym]===undefined&&loadNews(t.sym);
+      if(t.type==="filings")S.filings[t.sym]===undefined&&loadFilings(t.sym);
+      lpEnsure(t.sym);render()}});
+  $$("[data-lpwadd]").forEach(i=>i.onkeydown=(e)=>{if(e.key!=="Enter")return;
+    const t=S.launch.tiles.find(x=>x.id===i.dataset.lpwadd);const s=i.value.trim().toUpperCase();
+    if(t&&s&&!(t.syms||[]).includes(s)){t.syms.push(s);lpSave();lpEnsure(s);render()}});
+  $$("[data-lpwrm]").forEach(b=>b.onclick=()=>{const [id,s]=b.dataset.lpwrm.split("|");
+    const t=S.launch.tiles.find(x=>x.id===id);if(t){t.syms=(t.syms||[]).filter(x=>x!==s);lpSave();render()}});
+  // drag-and-drop reorder
+  $$("[data-lpdrag]").forEach(h=>{
+    h.ondragstart=e=>{S._lpdrag=h.dataset.lpdrag;e.dataTransfer.effectAllowed="move"};
+    h.ondragend=()=>{S._lpdrag=null};
+  });
+  $$("[data-lptile]").forEach(tile=>{
+    tile.ondrop=e=>{e.preventDefault();const from=S._lpdrag,to=tile.dataset.lptile;
+      if(!from||from===to)return;const ts=S.launch.tiles;
+      const fi=ts.findIndex(x=>x.id===from),ti=ts.findIndex(x=>x.id===to);
+      if(fi<0||ti<0)return;const [m]=ts.splice(fi,1);ts.splice(ti,0,m);lpSave();render()};
+  });
+  // draw the chart-tile sparklines
+  $$("#lpgrid canvas.spark").forEach(cv=>{const s=cv.dataset.spark,q=S.quotes[s];
+    if(q&&q.spark&&q.spark.length)drawSpark(cv,q.spark,q.spark.at(-1)>=q.spark[0])});
+}
 /* ============================================================ DATA (BQL-style data-out) */
 const DATA_CATS=[["price","Price"],["technical","Technical"],["fundamental","Fundamental"],["news","News"]];
 function dataQS(){
@@ -1728,7 +1885,7 @@ function fxOpen(){const d=new Date(),u=d.getUTCDay(),h=d.getUTCHours();
 
 /* ============================================================ render */
 const VIEWS={markets:vMarkets,security:vSecurity,portfolio:vPortfolio,
-  risk:vRisk,agents:vAgents,strats:vStrats,universe:vUniverse,audit:vAudit,journal:vJournals,industry:vIndustry,options:vOptions,calendar:vCalendar,screen:vScreen,alerts:vAlerts,data:vData};
+  risk:vRisk,agents:vAgents,strats:vStrats,universe:vUniverse,audit:vAudit,journal:vJournals,industry:vIndustry,options:vOptions,calendar:vCalendar,screen:vScreen,alerts:vAlerts,data:vData,launch:vLaunch};
 function render(scroll){
   // header
   $("#modechip").className="chip "+(S.mode==="live"?"live":"demo");
@@ -1809,6 +1966,7 @@ function render(scroll){
       try{S.uni.selector=await j("/api/universe/train",{method:"POST"});render();
         toast("selector: "+(S.uni.selector.phase||"?"),"ok")}catch(e){toast("train failed","err")}};
   }
+  if(S.page==="launch")lpBind();
   if(S.page==="data"){
     if(!S.dataFields){j("/api/data/fields").then(d=>{S.dataFields=d.fields||[];if(S.page==="data")render()}).catch(()=>{});}
     const ds=$("#dSyms");if(ds)ds.oninput=()=>S.dataSyms=ds.value;
@@ -1839,6 +1997,14 @@ function lightRepaint(){
       drawSpark(cv,q.spark,q.spark.at(-1)>=q.spark[0])});
   }
   if(S.page==="security"&&CH)drawChart(S.sym);
+  if(S.page==="launch"){ // update rows (watch/movers) + redraw chart sparks in place
+    $$("#lpgrid tr.rowlink[data-resolve]").forEach(tr=>{const s=tr.dataset.resolve,q=S.quotes[s];if(!q)return;
+      const tds=tr.querySelectorAll("td");if(tds.length<3)return;
+      tds[1].textContent=fmt(q.last,pxd(s));
+      const ch=chgOf(s);tds[2].textContent=pct(ch);tds[2].className="num "+cls(ch);});
+    $$("#lpgrid canvas.spark").forEach(cv=>{const s=cv.dataset.spark,q=S.quotes[s];
+      if(q&&q.spark&&q.spark.length)drawSpark(cv,q.spark,q.spark.at(-1)>=q.spark[0])});
+  }
   tapeFill();
 }
 
