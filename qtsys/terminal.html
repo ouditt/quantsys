@@ -545,8 +545,15 @@ async function liveRefresh(full){
       j("/api/orders"),j("/api/agents")])).map(r=>r.status==="fulfilled"?r.value:null);
     if(qs)qs.forEach(q=>{const o=S.quotes[q.symbol]||{};o.last=q.last;o.prevClose=q.last-q.chg;o.spark=q.spark;S.quotes[q.symbol]=o});
     if(acct){Object.assign(S.account,acct);S.halted=!!acct.halted;}
-    if(pos)S.positions=pos.map(p=>({symbol:p.symbol,qty:p.qty,
+    if(pos){S.positions=pos.map(p=>({symbol:p.symbol,qty:p.qty,
       avg_cost:p.avg_price??p.avg_cost,last:p.last,mkt_value:p.mkt_value,unrealized:p.unrealized}));
+      // seed held symbols not in the universe (options, other equities) so the
+      // portfolio/security views can render and quote them without crashing
+      pos.forEach(p=>{const isOpt=/^[A-Z]{1,6}\d{6}[CP]\d{8}$/.test(p.symbol);
+        if(!S.quotes[p.symbol])S.quotes[p.symbol]={last:p.last,prevClose:p.last,spark:[]};
+        else S.quotes[p.symbol].last=p.last;
+        if(!META[p.symbol])META[p.symbol]={name:isOpt?(p.symbol.slice(0,-15)+" option"):p.symbol,
+          cls:isOpt?"Option":"Equity",tradable:false};});}
     if(ords)S.orders=ords.map(o=>({id:o.id,symbol:o.symbol,side:o.side,qty:o.qty,
       type:o.type,limit_price:o.limit_price,status:o.status,ts:o.ts}));
     if(ag){S.agents.master=ag.master;S.agents.list=ag.agents;}
@@ -564,13 +571,13 @@ async function liveRefresh(full){
 /* ============================================================ analytics */
 function smaArr(cs,n){const out=Array(cs.length).fill(null);let s=0;
   for(let i=0;i<cs.length;i++){s+=cs[i];if(i>=n)s-=cs[i-n];if(i>=n-1)out[i]=s/n}return out}
-function rsi(cs,n=14){let g=0,l=0;for(let i=cs.length-n;i<cs.length;i++){
+function rsi(cs,n=14){if(!cs||cs.length<n+1)return NaN;let g=0,l=0;for(let i=cs.length-n;i<cs.length;i++){
   const d=cs[i]-cs[i-1];if(d>0)g+=d;else l-=d}
   return l===0?100:100-100/(1+(g/n)/(l/n))}
-function atr(bars,n=14){let s=0;for(let i=bars.length-n;i<bars.length;i++){
+function atr(bars,n=14){if(!bars||bars.length<n+1)return NaN;let s=0;for(let i=bars.length-n;i<bars.length;i++){
   const b=bars[i],pc=bars[i-1].c;
   s+=Math.max(b.h-b.l,Math.abs(b.h-pc),Math.abs(b.l-pc))}return s/n}
-function rvol(cs,n=20){const rs=[];for(let i=cs.length-n;i<cs.length;i++)
+function rvol(cs,n=20){if(!cs||cs.length<n+1)return NaN;const rs=[];for(let i=cs.length-n;i<cs.length;i++)
   rs.push(Math.log(cs[i]/cs[i-1]));
   const m=rs.reduce((a,b)=>a+b,0)/n;
   return Math.sqrt(rs.reduce((a,b)=>a+(b-m)**2,0)/(n-1))*Math.sqrt(252)}
@@ -883,7 +890,8 @@ function vMarkets(){
 function vSecurity(){
   const s=S.sym,q=S.quotes[s],m=META[s],ch=chgOf(s),bars=S.bars[s]||[];
   const cs=bars.map(b=>b.c);
-  const hi52=Math.max(...bars.slice(-252).map(b=>b.h)),lo52=Math.min(...bars.slice(-252).map(b=>b.l));
+  const hi52=bars.length?Math.max(...bars.slice(-252).map(b=>b.h)):NaN,
+        lo52=bars.length?Math.min(...bars.slice(-252).map(b=>b.l)):NaN;
   const read=agentRead(s), pos=S.positions.find(p=>p.symbol===s);
   const myOrders=S.orders.filter(o=>o.symbol===s&&o.status==="working");
   const t=S.ticket, last=q.last, lp=t.lp??+(last*(t.side==="buy"?0.995:1.005)).toFixed(pxd(s));

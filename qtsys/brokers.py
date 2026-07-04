@@ -15,9 +15,17 @@ fails a check is never sent. The kill switch halts and flattens.
 from __future__ import annotations
 
 import itertools
+import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+
+# OCC option symbol, e.g. AAPL260807C00300000 (root + YYMMDD + C/P + strike*1000)
+_OPTION_RE = re.compile(r"^[A-Z]{1,6}\d{6}[CP]\d{8}$")
+
+
+def _is_option(symbol: str) -> bool:
+    return bool(_OPTION_RE.match(symbol))
 
 
 # ------------------------------------------------------------------ order model
@@ -329,10 +337,28 @@ class AlpacaBroker(Broker):
         if "/" in symbol:   # crypto pair, e.g. "BTC/USD"
             t = self.dc.get_crypto_latest_trade(
                 self._req["last_crypto"](symbol_or_symbols=symbol))
+        elif _is_option(symbol):        # OCC option, e.g. AAPL260807C00300000
+            return self._option_quote(symbol)
         else:
             t = self.d.get_stock_latest_trade(
                 self._req["last"](symbol_or_symbols=symbol))
         return float(t[symbol].price)
+
+    def _option_quote(self, symbol: str) -> float:
+        from alpaca.data.historical.option import OptionHistoricalDataClient
+        from alpaca.data.requests import (OptionLatestTradeRequest,
+                                          OptionLatestQuoteRequest)
+        if not getattr(self, "_oc", None):
+            self._oc = OptionHistoricalDataClient(self._key, self._sec)
+        try:
+            t = self._oc.get_option_latest_trade(
+                OptionLatestTradeRequest(symbol_or_symbols=symbol))
+            return float(t[symbol].price)
+        except Exception:               # no trade today -> mid of latest quote
+            q = self._oc.get_option_latest_quote(
+                OptionLatestQuoteRequest(symbol_or_symbols=symbol))
+            b, a = float(q[symbol].bid_price), float(q[symbol].ask_price)
+            return (b + a) / 2 if (b and a) else (a or b)
 
     def news(self, symbol: str, limit: int = 25) -> list[dict]:
         """Real headlines for a symbol (equities & crypto) from Alpaca's news
