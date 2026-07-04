@@ -1,0 +1,24 @@
+MORNING BRIEFING — real data as of 2026-06-29
+
+REGIMES:
+  WTI     DOWN trend | fast DOWN | vol CALM   (0.68) | RSI 28.6
+  BRENT   DOWN trend | fast DOWN | vol CALM   (0.6) | RSI 27.2
+  NATGAS  DOWN trend | fast UP   | vol CALM   (0.37) | RSI 59.9
+  BTC     DOWN trend | fast UP   | vol CALM   (0.68) | RSI 45.3
+  ETH     DOWN trend | fast UP   | vol CALM   (0.56) | RSI 38.9
+  EURUSD  DOWN trend | fast DOWN | vol NORMAL (1.09) | RSI 35.2
+  GBPUSD  DOWN trend | fast DOWN | vol NORMAL (0.95) | RSI 38.0
+  AUDUSD  UP   trend | fast DOWN | vol NORMAL (0.91) | RSI 32.2
+  JPYUSD  DOWN trend | fast DOWN | vol CALM   (0.42) | RSI 28.1
+  CHFUSD  DOWN trend | fast DOWN | vol NORMAL (1.08) | RSI 35.1
+  CADUSD  DOWN trend | fast DOWN | vol NORMAL (1.03) | RSI 26.9
+
+RANKED SETUPS (best real-data evidence first — act top-down):
+  [SURVIVOR ] SHORT ETH       via donchian_20     hist exp +5.65%/trade (n=202, spec DSR 0.99)
+  [SURVIVOR ] SHORT BTC       via donchian_20     hist exp +2.01%/trade (n=252, spec DSR 0.99)
+  [SURVIVOR ] SHORT BRENT     via donchian_20     hist exp +0.63%/trade (n=172, spec DSR 0.99)
+  [SURVIVOR ] SHORT WTI       via donchian_20     hist exp -0.40%/trade (n=173, spec DSR 0.99)
+  [CANDIDATE] SHORT BRENT     via donchian_55     hist exp -0.16%/trade (n=120, spec DSR 0.86)
+  [CANDIDATE] SHORT WTI       via donchian_55     hist exp -0.57%/trade (n=119, spec DSR 0.86)
+
+Rule: SURVIVOR tier is tradable at posture risk; CANDIDATE at half; WATCH-ONLY is never traded, only journaled.

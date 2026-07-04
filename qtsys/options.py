@@ -111,5 +111,48 @@ def _selftest():
           f"({'PASS' if ms < 5 else 'note'} vs the 5 ms target)")
 
 
+def enrich_chain(contracts: list[dict], spot: float, r: float = 0.04,
+                 q: float = 0.0) -> list[dict]:
+    """Add implied vol + Greeks to a live chain (from broker.option_chain).
+
+    OPUS SHELL glue: prices each contract off its mid using the existing
+    Black-Scholes IV/greeks math above — sound and immediately useful.
+
+    FABLE 5 TODO (the analytics core to refine here):
+      - fit/interpolate a no-arbitrage vol SURFACE (SVI or arb-free spline) per
+        expiry rather than per-contract Newton IV; smooth the wings
+      - use american_binomial for early-exercise-aware IV on American equity
+        options (BS IV mis-states deep ITM near dividends)
+      - quality-gate on spread width / 0-bid / stale quotes; build the term
+        structure; expose skew, 25d risk-reversal, butterfly
+    """
+    import datetime
+    today = datetime.date.today()
+    out = []
+    for c in contracts:
+        mid = ((c["bid"] + c["ask"]) / 2.0) if (c.get("bid") and c.get("ask")) \
+            else c.get("last")
+        K = c["strike"]
+        try:
+            T = max((datetime.date.fromisoformat(c["expiration"]) - today).days, 1) / 365.0
+        except Exception:
+            T = None
+        iv = delta = gamma = theta = vega = None
+        if mid and mid > 0 and T and spot > 0:
+            try:
+                iv = float(implied_vol(mid, spot, K, T, r, c["type"], q))
+                if 0 < iv < 5:
+                    g = greeks(spot, K, T, r, iv, c["type"], q)
+                    delta, gamma = float(g["delta"]), float(g["gamma"])
+                    theta, vega = float(g["theta"]), float(g["vega"])
+                else:
+                    iv = None
+            except Exception:
+                iv = None
+        out.append({**c, "mid": mid, "iv": iv, "delta": delta, "gamma": gamma,
+                    "theta": theta, "vega": vega})
+    return out
+
+
 if __name__ == "__main__":
     _selftest()

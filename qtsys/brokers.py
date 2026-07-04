@@ -344,6 +344,55 @@ class AlpacaBroker(Broker):
                 self._req["last"](symbol_or_symbols=symbol))
         return float(t[symbol].price)
 
+    def option_chain(self, underlying: str, n_exp: int = 6,
+                     strike_pct: float = 0.35) -> list[dict]:
+        """Live option chain for an underlying: nearest `n_exp` expirations,
+        strikes within +/-strike_pct of spot. Returns flat contract dicts with
+        strike/expiration/type/bid/ask/last/open_interest — greeks/IV are added
+        downstream (options.enrich_chain). Empty on any error."""
+        try:
+            import datetime
+            from alpaca.trading.requests import GetOptionContractsRequest
+            from alpaca.data.historical.option import OptionHistoricalDataClient
+            from alpaca.data.requests import OptionChainRequest
+            spot = self.get_quote(underlying)
+            lo, hi = spot * (1 - strike_pct), spot * (1 + strike_pct)
+            today = datetime.date.today()
+            req = GetOptionContractsRequest(
+                underlying_symbols=[underlying],
+                expiration_date_gte=today,
+                strike_price_gte=str(round(lo, 2)),
+                strike_price_lte=str(round(hi, 2)), limit=1000)
+            res = self.c.get_option_contracts(req)
+            cons = getattr(res, "option_contracts", res) or []
+            exps = sorted({c.expiration_date for c in cons})[:n_exp]
+            cons = [c for c in cons if c.expiration_date in exps]
+            if not getattr(self, "_oc", None):
+                self._oc = OptionHistoricalDataClient(self._key, self._sec)
+            try:
+                snaps = self._oc.get_option_chain(
+                    OptionChainRequest(underlying_symbol=underlying)) or {}
+            except Exception:
+                snaps = {}
+            out = []
+            for c in cons:
+                sn = snaps.get(c.symbol)
+                q = getattr(sn, "latest_quote", None) if sn else None
+                tr = getattr(sn, "latest_trade", None) if sn else None
+                out.append({
+                    "symbol": c.symbol, "underlying": underlying,
+                    "expiration": str(c.expiration_date),
+                    "strike": float(c.strike_price),
+                    "type": c.type.value if hasattr(c.type, "value") else str(c.type),
+                    "bid": float(q.bid_price) if q and q.bid_price else None,
+                    "ask": float(q.ask_price) if q and q.ask_price else None,
+                    "last": float(tr.price) if tr and tr.price else (
+                        float(c.close_price) if c.close_price else None),
+                    "open_interest": int(c.open_interest) if c.open_interest else None})
+            return out
+        except Exception:
+            return []
+
     def _option_quote(self, symbol: str) -> float:
         from alpaca.data.historical.option import OptionHistoricalDataClient
         from alpaca.data.requests import (OptionLatestTradeRequest,

@@ -174,6 +174,9 @@ tr.rowlink:hover{background:var(--panel2)}
   border:1px solid var(--line2);border-radius:3px;color:var(--fg);text-align:center}
 .asel{padding:4px 8px;font-size:11px;background:var(--bg0);border:1px solid var(--line2);
   border-radius:4px;color:var(--fg)}
+table.opt th,table.opt td{padding:3px 6px;font-size:10.5px;text-align:right}
+table.opt tr.atm{background:var(--amber-glow)}
+table.opt tr.atm td{border-top:1px solid var(--amber);border-bottom:1px solid var(--amber)}
 .seg{display:flex;border:1px solid var(--line2);border-radius:4px;overflow:hidden}
 .seg button{padding:6px 12px;font-size:11px;color:var(--mut)}
 .seg button.on{background:var(--amber);color:#000;font-weight:700}
@@ -350,6 +353,7 @@ const S={
  agents:{master:true,list:[]}, alog:[],
  news:[], assetNews:{}, assetNarr:{}, newsEngine:"", fund:{}, ticket:{side:"buy",type:"market"},
  industry:null, industryFor:null,
+ options:null, optionsFor:null, optExp:"",
  strategies:{asof:null,rows:[]}, stratOpen:null,
  audit:{results:[],universe:[],strategies:[]}, auditStrat:"", auditAsset:"", auditAgent:"",
  uni:{running:false,progress:"",last:null,selector:null}, uniResults:[], uniInstruments:[],
@@ -914,7 +918,8 @@ function vSecurity(){
   <button id="backbtn" data-nav="markets">← BACK</button>
   <a class="chip" style="float:right" href="#/sec/${s}" target="_blank" rel="noopener">⧉ open as page</a>
   <div id="sec-head"><h1>${s}</h1><span class="nm">${esc(m.name)}</span>
-    <span class="chip">${m.cls}</span><span class="chip ${sess[0]}">${sess[1]} ${sess[0].toUpperCase()}</span></div>
+    <span class="chip">${m.cls}</span><span class="chip ${sess[0]}">${sess[1]} ${sess[0].toUpperCase()}</span>
+    ${m.cls==="Equity"?`<span class="chip" data-options="${s}" style="cursor:pointer;color:var(--amber)">⊙ OPTIONS ↗</span>`:""}</div>
   <div style="display:flex;align-items:baseline;gap:12px;margin-bottom:10px">
     <span class="bigpx num">${fmt(last,pxd(s))}</span>
     <span class="num ${cls(ch)}" style="font-size:15px">${pct(ch)} today</span></div>
@@ -1064,6 +1069,45 @@ function drawPie(){
       x.fillStyle="#0b0f15";x.font="bold 10px "+getComputedStyle(document.body).fontFamily;
       x.textAlign="center";x.fillText(c.symbol,lx,ly)}
     a=a2});
+}
+async function loadOptions(s,exp){
+  S.optionsFor=s;if(exp!==undefined)S.optExp=exp;
+  if(exp===undefined){S.options=null;S.optExp="";}
+  nav("options");
+  try{S.options=await j("/api/options/"+encodeURIComponent(s)+(S.optExp?"?exp="+encodeURIComponent(S.optExp):""))}
+  catch(e){S.options={error:e.detail||"failed to load chain"}}
+  render();
+}
+function vOptions(){
+  const d=S.options, base=S.optionsFor;
+  const back=`<button id="backbtn" data-sym="${esc(base||"")}">← BACK to ${esc(base||"")}</button>`;
+  if(!d)return `${back}<div class="panel"><div class="pb mut">loading option chain…</div></div>`;
+  if(d.error||!d.chain||!d.chain.length)
+    return `${back}<div class="panel"><div class="ph">Options · ${esc(base||"")}</div><div class="pb mut">${esc(d.error||d.note||"no options for this underlying")}</div></div>`;
+  const spot=d.spot;
+  const nn=(x,dg=2)=>x==null?"—":(+x).toFixed(dg);
+  const iv=x=>x==null?"—":(x*100).toFixed(1)+"%";
+  const expSeg=`<span class="seg">${(d.expirations||[]).slice(0,10).map(e=>
+    `<button data-optexp="${e}" class="${d.expiration===e?"on":""}">${e.slice(5)}</button>`).join("")}</span>`;
+  // find ATM strike (closest to spot)
+  let atm=null,best=1e18;for(const r of d.chain){const dd=Math.abs(r.strike-spot);if(dd<best){best=dd;atm=r.strike}}
+  const side=(o)=>o?`<td class="num">${nn(o.bid)}</td><td class="num">${nn(o.ask)}</td><td class="num">${nn(o.last)}</td>
+    <td class="num">${iv(o.iv)}</td><td class="num ${o.delta>=0?"up":"dn"}">${nn(o.delta,3)}</td>
+    <td class="num mut">${o.open_interest??"—"}</td>`:`<td colspan="6" class="mut"></td>`;
+  const rows=d.chain.map(r=>`<tr class="${r.strike===atm?"atm":""}">
+    ${side(r.call)}
+    <td class="num" style="font-weight:700;background:var(--bg1)" data-resolve="${esc((r.call||r.put||{}).symbol||"")}">${nn(r.strike)}</td>
+    ${side(r.put)}</tr>`).join("");
+  return `${back}
+  <div id="sec-head"><h1>Options · ${esc(d.underlying)}</h1>
+    <span class="chip">spot ${nn(spot)}</span><span class="chip">r ${(d.r*100).toFixed(2)}%</span>
+    <span class="chip" data-sym="${esc(d.underlying)}" style="cursor:pointer">chart ↗</span></div>
+  <div class="panel"><div class="ph">Chain <span class="right">${expSeg}</span></div>
+    <div style="overflow-x:auto;max-height:60vh"><table class="opt"><thead>
+      <tr><th colspan="6" style="text-align:center;color:var(--up)">CALLS</th><th>Strike</th><th colspan="6" style="text-align:center;color:var(--dn)">PUTS</th></tr>
+      <tr><th>Bid</th><th>Ask</th><th>Last</th><th>IV</th><th>Δ</th><th>OI</th><th></th><th>Bid</th><th>Ask</th><th>Last</th><th>IV</th><th>Δ</th><th>OI</th></tr>
+    </thead><tbody>${rows}</tbody></table></div>
+    <div class="note">Live chain from Alpaca; IV & Greeks (Δ shown) computed via Black-Scholes. Click a strike to open that contract. <b>Vol surface, skew/term-structure, no-arbitrage fitting and American-exercise IV are the analytics core coming from Fable 5</b> — this is the ready harness.</div></div>`;
 }
 async function loadFund(s){
   if(S.mode!=="live"||S.fund[s]!==undefined||S._floading.has(s))return;
@@ -1438,7 +1482,7 @@ function fxOpen(){const d=new Date(),u=d.getUTCDay(),h=d.getUTCHours();
 
 /* ============================================================ render */
 const VIEWS={markets:vMarkets,security:vSecurity,portfolio:vPortfolio,
-  risk:vRisk,agents:vAgents,strats:vStrats,universe:vUniverse,audit:vAudit,journal:vJournals,industry:vIndustry};
+  risk:vRisk,agents:vAgents,strats:vStrats,universe:vUniverse,audit:vAudit,journal:vJournals,industry:vIndustry,options:vOptions};
 function render(scroll){
   // header
   $("#modechip").className="chip "+(S.mode==="live"?"live":"demo");
@@ -1588,6 +1632,10 @@ document.addEventListener("click",e=>{
     nav("security",symEl.dataset.sym);return}
   const ind=e.target.closest("[data-industry]");
   if(ind){loadIndustry(ind.dataset.industry);return}
+  const opt=e.target.closest("[data-options]");
+  if(opt){loadOptions(opt.dataset.options);return}
+  const oe=e.target.closest("[data-optexp]");
+  if(oe){loadOptions(S.optionsFor,oe.dataset.optexp);return}
   const ro=e.target.closest("[data-resolve]");
   if(ro){resolveSym(ro.dataset.resolve);return}
   const strat=e.target.closest("[data-strat]");

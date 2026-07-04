@@ -315,6 +315,49 @@ async def _news_narrative(sym: str, items: list[dict]) -> str:
     return txt
 
 
+@app.get("/api/options/{sym}")
+async def options_chain(sym: str, exp: str = ""):
+    """Live option chain for an underlying, greeks/IV enriched. Grouped by
+    expiration; each strike carries its call and put side by side."""
+    broker = state["broker"]
+    if not hasattr(broker, "option_chain"):
+        raise HTTPException(400, "options need an Alpaca venue")
+    return await asyncio.to_thread(_build_chain, broker, sym.upper(), exp)
+
+
+def _build_chain(broker, sym, exp) -> dict:
+    from . import intel, options
+    contracts = broker.option_chain(sym)
+    if not contracts:
+        return {"underlying": sym, "spot": None, "expirations": [],
+                "chain": [], "note": "no options for this underlying"}
+    try:
+        spot = broker.get_quote(sym)
+    except Exception:
+        spot = None
+    r = 0.04
+    try:                                        # risk-free from FRED 3-month
+        v = intel._fred_latest("DGS3MO")
+        if v:
+            r = float(v) / 100.0
+    except Exception:
+        pass
+    enriched = options.enrich_chain(contracts, spot or 0.0, r)
+    exps = sorted({c["expiration"] for c in enriched})
+    pick = exp if exp in exps else (exps[0] if exps else "")
+    byk: dict = {}
+    for c in enriched:
+        if c["expiration"] != pick:
+            continue
+        row = byk.setdefault(c["strike"], {"strike": c["strike"], "call": None, "put": None})
+        row[c["type"]] = {k: c[k] for k in ("symbol", "bid", "ask", "last", "mid",
+                                            "open_interest", "iv", "delta", "gamma",
+                                            "theta", "vega")}
+    chain = [byk[k] for k in sorted(byk)]
+    return {"underlying": sym, "spot": spot, "r": r, "expiration": pick,
+            "expirations": exps, "chain": chain}
+
+
 @app.get("/api/industry")
 async def industry(sym: str):
     """Sector of `sym` + its constituents, each with LIVE % change (computed in
