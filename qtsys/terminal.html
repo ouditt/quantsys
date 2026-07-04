@@ -347,6 +347,8 @@ const S={
  halted:false, peak:0,
  agents:{master:true,list:[]}, alog:[],
  news:[], assetNews:{}, fund:{}, ticket:{side:"buy",type:"market"},
+ strategies:{asof:null,rows:[]}, stratOpen:null,
+ reports:[], reportOpen:null, reportText:"", journalText:"",
 };
 S._nloading=new Set();S._floading=new Set();
 try{Object.assign(S.p,JSON.parse(localStorage.getItem("qtsys_params")||"{}"))}catch(e){}
@@ -520,6 +522,9 @@ async function liveInit(){
   S.news=deriveEvents();
   try{const P=await j("/api/posture");Object.assign(POSTURE_STATS,P.stats);applyPosture(P.current,false);renderTracking(P)}
   catch(e){applyPosture(CUR_POSTURE,false)}
+  try{S.strategies=await j("/api/strategies")}catch(e){}
+  try{S.reports=(await j("/api/reports")).reports||[]}catch(e){}
+  try{S.journalText=(await j("/api/journal")).text||""}catch(e){}
 }
 function renderTracking(P){
   if(!P||!P.backtest)return;
@@ -858,7 +863,7 @@ async function toggleAgent(name,enabled){
 }
 
 /* ============================================================ views */
-const TABS=[["markets","MKT"],["portfolio","PORT"],["risk","RISK"],["agents","AGENTS"],["strats","STRAT"]];
+const TABS=[["markets","MKT"],["portfolio","PORT"],["risk","RISK"],["agents","AGENTS"],["strats","STRAT"],["journal","JOURNAL"]];
 function nav(page,sym){S.page=page;S.sym=sym??S.sym;
   location.hash=page==="security"?`/sec/${S.sym}`:`/${page}`;
   render();$("#view").scrollTop=0}
@@ -1154,20 +1159,31 @@ function vAgents(){
 }
 
 function vStrats(){
-  const row=(t,tr,wr,aw,ex,pf,sh,ds)=>`<tr><td>${t}</td><td class="num">${tr}</td>
-    <td class="num">${wr}</td><td class="num up">${aw}</td><td class="num">${ex}</td>
-    <td class="num">${pf}</td><td class="num">${sh}</td>
-    <td><span class="pill ${+ds>=0.95?"up":"dn"}">${ds}</span></td></tr>`;
+  const st=S.strategies||{rows:[]},rows=st.rows||[];
+  const fp=x=>x==null?"—":(x*100).toFixed(2)+"%",fn=x=>x==null?"—":(+x).toFixed(2);
+  const asof=st.asof?new Date(st.asof*1000).toISOString().slice(0,16).replace("T"," "):"—";
+  const vp=v=>v==="pass"?"up":v==="watch"?"warn":"dn";
+  let tbody;
+  if(!rows.length){tbody=`<tr><td colspan="7" class="mut">${S.mode==="live"?"loading registry…":"registry loads from the live server (python -m qtsys.sweep generates it)"}</td></tr>`;}
+  else tbody=rows.map(r=>`<tr class="rowlink" data-strat="${r.id}">
+    <td><span class="sym">${r.id}</span><br><span class="mut" style="font-size:10px">${esc(r.family||"")}</span></td>
+    <td class="num">${r.train_n??"—"}/${r.test_n??"—"}</td>
+    <td class="num">${fp(r.test_wr)}</td>
+    <td class="num ${(r.test_exp||0)>=0?"up":"dn"}">${fp(r.test_exp)}</td>
+    <td class="num">${fn(r.test_pf)}</td>
+    <td><span class="pill ${vp(r.verdict)}">${fn(r.dsr)}</span></td>
+    <td class="mut" style="font-size:10.5px">${esc((r.status||"").split("—")[0].trim())}</td></tr>
+    ${S.stratOpen===r.id?`<tr><td colspan="7" style="background:var(--bg1)"><div class="pb" style="font-size:11.5px;line-height:1.7">
+      <b>Agent thesis · ${r.id}</b> — <span class="mut">${esc(r.family||"")}</span><br>
+      Trained on ${r.train_n} in-sample events (expectancy ${fp(r.train_exp)}); held-out OOS: ${fp(r.test_exp)} net expectancy/trade over ${r.test_n} events, win rate ${fp(r.test_wr)}, profit factor ${fn(r.test_pf)}.<br>
+      <b>DSR ${fn(r.dsr)}</b> — ${r.dsr>=0.95?"clears the 0.95 reliability gate (probability the edge survives after correcting for how many variants were tried) → <span class='up'>deploy-eligible, proceed to paper</span>.":r.dsr>=0.8?"below the 0.95 gate → <span class='warn' style='color:var(--warn)'>promising but unconfirmed</span>; needs more OOS evidence, paper at half risk.":"treated as <span class='dn'>noise / overfit</span> → not deployed; more tuning makes it worse."}<br>
+      <span class="mut">Verdict: ${esc(r.status||"")}</span></div></td></tr>`:""}`).join("");
   return `
-  <div class="panel"><div class="ph">Verified out-of-sample · net of all fees</div>
-  <div style="overflow-x:auto"><table><thead><tr><th>Strategy</th><th>Trades</th><th>Win rate</th>
-    <th>Avg win</th><th>Expect./trade</th><th>PF</th><th>Sharpe</th><th>DSR gate</th></tr></thead><tbody>
-    ${row("Momentum · base",441,"52.6%","+4.93%","−0.478%","0.84","−0.27","0.182")}
-    ${row("Momentum · <b>agent-selected</b>",122,"53.3%","+4.25%","+0.361%","1.19","0.16","0.733")}
-    ${row("Mean-rev · base",853,"51.5%","+4.13%","+0.287%","1.16","0.30","0.880")}
-    ${row("Mean-rev · <b>agent-selected</b>",317,"56.5%","+6.40%","<b>+0.917%</b>","1.34","0.51","0.955")}
-  </tbody></table></div>
-  <div class="note">REAL cross-asset run (WTI, Brent, NatGas, BTC, ETH, 6 FX majors; 1971→2026): train &lt; 2013-05-29 ≤ test, purged CV, threshold frozen before test, per-class fees charged. Objective: NET EXPECTANCY = win rate × avg win − loss side. Momentum·selected improves but is <b>REJECTED</b> by the DSR gate — refusing to endorse noise is the system working. Mean-rev·selected passes → paper trading.</div></div>
+  <div class="panel"><div class="ph">Research registry · verified out-of-sample, net of fees
+    <span class="right mut">last sweep ${asof}</span></div>
+  <div style="overflow-x:auto"><table><thead><tr><th>Strategy</th><th>Train/Test n</th><th>OOS win rate</th>
+    <th>OOS expect./trade</th><th>PF</th><th>DSR gate</th><th>Verdict</th></tr></thead><tbody>${tbody}</tbody></table></div>
+  <div class="note"><b>Click any strategy</b> for the agent's full thesis. This is the live registry from the last <code>python -m qtsys.sweep</code> — it does <b>not</b> auto-update as time passes; re-run the sweep to refresh it. DSR ≥ 0.95 = deploy-eligible (green) · 0.80–0.95 = watch (amber) · &lt; 0.80 = rejected (red). Objective: NET EXPECTANCY = win rate × avg win − loss side, per-class fees charged.</div></div>
 
   <div class="panel"><div class="ph">Champion / challenger pipeline</div><div class="pb" style="font-size:11.5px;line-height:1.9">
     <span class="pill">research registry</span> → <span class="pill">retrain (rolling)</span> →
@@ -1184,6 +1200,35 @@ function vStrats(){
     T7 broker adapters verified offline
   </div></div>`;
 }
+function vJournals(){
+  const reps=S.reports||[];
+  const list=reps.length?reps.map(r=>{const dt=new Date(r.ts*1000).toISOString().slice(0,16).replace("T"," ");
+    const kind=r.name.replace(/_\d+\.txt$/,"").replace(/_/g," ");
+    return `<tr class="rowlink${S.reportOpen===r.name?" on":""}" data-report="${esc(r.name)}">
+      <td><span class="sym">${esc(kind)}</span></td><td class="mut">${(r.name.match(/(\d{4})(\d{2})(\d{2})/)||[]).slice(1).join("-")||"—"}</td>
+      <td class="mut">${dt}</td></tr>`}).join("")
+    :`<tr><td colspan="3" class="mut">No reports filed yet. Agents write briefings, risk reports and daily wraps to <code>reports/</code> when their scheduled tasks fire — turn the master switch ON (Agents tab) so they run.</td></tr>`;
+  return `
+  <div class="cols"><div>
+  <div class="panel"><div class="ph">Agent journals · reports/ <span class="right mut">${reps.length} filed</span></div>
+    <table><thead><tr><th>Report</th><th>Date</th><th>Filed</th></tr></thead><tbody>${list}</tbody></table></div>
+  <div class="panel"><div class="ph">Trade journal · weekly review</div>
+    <pre class="pb" style="white-space:pre-wrap;font-size:11px;line-height:1.5;margin:0">${esc(S.journalText||"loading…")}</pre></div>
+  </div><div>
+  <div class="panel"><div class="ph">${S.reportOpen?esc(S.reportOpen):"Report viewer"}</div>
+    <pre class="pb" style="white-space:pre-wrap;font-size:11px;line-height:1.5;margin:0;max-height:340px;overflow:auto">${esc(S.reportText||"Click a report on the left to read it.")}</pre></div>
+  <div class="panel"><div class="ph">Live agent log</div>
+    <div class="pb" style="max-height:280px;overflow:auto">${(S.alog||[]).slice(0,50).map(x=>
+      `<div class="logline"><span class="t">${new Date(x.ts*1000).toTimeString().slice(0,5)}</span>
+       <span class="m"><b>${esc(x.agent)}</b> ${esc(x.message)}</span></div>`).join("")||'<span class="mut">no agent activity yet — master switch is OFF</span>'}</div></div>
+  </div></div>`;
+}
+async function loadReport(name){
+  S.reportOpen=name;S.reportText="loading…";render();
+  try{const r=await j("/api/reports/"+encodeURIComponent(name));S.reportText=r.text||"(empty)"}
+  catch(e){S.reportText="(failed to load report)"}
+  render();
+}
 
 /* ============================================================ sessions */
 function eqOpen(){const d=new Date(),u=d.getUTCDay(),h=d.getUTCHours()+d.getUTCMinutes()/60;
@@ -1193,7 +1238,7 @@ function fxOpen(){const d=new Date(),u=d.getUTCDay(),h=d.getUTCHours();
 
 /* ============================================================ render */
 const VIEWS={markets:vMarkets,security:vSecurity,portfolio:vPortfolio,
-  risk:vRisk,agents:vAgents,strats:vStrats};
+  risk:vRisk,agents:vAgents,strats:vStrats,journal:vJournals};
 function render(scroll){
   // header
   $("#modechip").className="chip "+(S.mode==="live"?"live":"demo");
@@ -1325,6 +1370,10 @@ document.addEventListener("click",e=>{
   const symEl=e.target.closest("[data-sym]");
   if(symEl){e.stopPropagation();S.tf=380;S.ticket={side:"buy",type:"market"};
     nav("security",symEl.dataset.sym);return}
+  const strat=e.target.closest("[data-strat]");
+  if(strat){S.stratOpen=S.stratOpen===strat.dataset.strat?null:strat.dataset.strat;render();return}
+  const rep=e.target.closest("[data-report]");
+  if(rep){loadReport(rep.dataset.report);return}
   const nv=e.target.closest("[data-nav]");
   if(nv){nav(nv.dataset.nav);return}
   const cx=e.target.closest("[data-cancel]");

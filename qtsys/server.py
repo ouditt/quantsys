@@ -454,6 +454,75 @@ async def api_tracking():
     return await asyncio.to_thread(_tracking)
 
 
+@app.get("/api/strategies")
+def strategies():
+    """The REAL research registry (registry_summary.csv), with the agent's
+    verdict per strategy. This is a snapshot from the last `python -m qtsys.sweep`
+    run — it does NOT auto-update; asof is the file's mtime."""
+    import csv
+    p = os.path.join(HERE, "registry_summary.csv")
+    if not os.path.exists(p):
+        return {"asof": None, "rows": []}
+
+    def num(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+    rows = []
+    with open(p) as f:
+        for r in csv.DictReader(f):
+            d = num(r.get("dsr"))
+            rows.append({
+                "id": r.get("id"), "family": r.get("family"),
+                "train_n": num(r.get("train_n")), "train_exp": num(r.get("train_exp")),
+                "test_n": num(r.get("test_n")), "test_wr": num(r.get("test_wr")),
+                "test_exp": num(r.get("test_exp")), "test_pf": num(r.get("test_pf")),
+                "dsr": d, "status": r.get("status", ""),
+                "verdict": "pass" if (d or 0) >= 0.95 else
+                           "watch" if (d or 0) >= 0.80 else "reject"})
+    rows.sort(key=lambda x: (x["dsr"] or 0), reverse=True)
+    return {"asof": os.path.getmtime(p), "rows": rows}
+
+
+@app.get("/api/reports")
+def reports_list():
+    """Journals/reports the agents have filed to reports/ (briefings, risk,
+    daily wraps)."""
+    d = os.path.join(HERE, "reports")
+    out = []
+    if os.path.isdir(d):
+        for fn in sorted(os.listdir(d), reverse=True):
+            if fn.endswith(".txt"):
+                fp = os.path.join(d, fn)
+                out.append({"name": fn, "ts": os.path.getmtime(fp),
+                            "size": os.path.getsize(fp)})
+    return {"reports": out}
+
+
+@app.get("/api/reports/{name}")
+def report_read(name: str):
+    fp = os.path.join(HERE, "reports", os.path.basename(name))   # no traversal
+    if not os.path.isfile(fp):
+        raise HTTPException(404, "no such report")
+    with open(fp) as f:
+        return {"name": os.path.basename(name), "text": f.read()}
+
+
+@app.get("/api/journal")
+def journal():
+    """The trade journal weekly review (empty until trades are logged)."""
+    jp = os.path.join(HERE, "journal.db")
+    if not os.path.exists(jp):
+        return {"text": "No trades journaled yet — the trade journal fills once "
+                        "live/paper fills are recorded."}
+    try:
+        from .journal import Journal
+        return {"text": Journal(jp).weekly_review()}
+    except Exception as e:
+        return {"text": f"journal read error: {e}"}
+
+
 @app.get("/api/scan")
 async def api_scan():
     """Morning scan (cards 1/4): fresh setups ranked by their own real
