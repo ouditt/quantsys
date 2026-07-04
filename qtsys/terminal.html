@@ -354,6 +354,8 @@ const S={
  news:[], assetNews:{}, assetNarr:{}, newsEngine:"", fund:{}, ticket:{side:"buy",type:"market"},
  industry:null, industryFor:null,
  options:null, optionsFor:null, optExp:"", calendar:null,
+ screen:null, screenPreset:"all", screenSort:{col:"market_cap",dir:-1},
+ screenFilters:{peMax:null,mcapMin:null,revMin:null,marginMin:null,divMin:null,sector:""},
  strategies:{asof:null,rows:[]}, stratOpen:null,
  audit:{results:[],universe:[],strategies:[]}, auditStrat:"", auditAsset:"", auditAgent:"",
  uni:{running:false,progress:"",last:null,selector:null}, uniResults:[], uniInstruments:[],
@@ -536,6 +538,7 @@ async function liveInit(){
   try{S.audit=await j("/api/audit")}catch(e){}
   try{S.uni=await j("/api/universe/status");const r=await j("/api/universe/results");S.uniResults=r.setups||[];S.uniInstruments=r.instruments||[]}catch(e){}
   j("/api/calendar").then(c=>{S.calendar=c;if(S.page==="calendar")render()}).catch(()=>{});
+  j("/api/screen").then(d=>{S.screen=d.rows||[];if(S.page==="screen")render()}).catch(()=>{});
   try{S.reports=(await j("/api/reports")).reports||[]}catch(e){}
   try{S.journalText=(await j("/api/journal")).text||""}catch(e){}
 }
@@ -876,7 +879,7 @@ async function toggleAgent(name,enabled){
 }
 
 /* ============================================================ views */
-const TABS=[["markets","MKT"],["portfolio","PORT"],["risk","RISK"],["calendar","CAL"],["agents","AGENTS"],["strats","STRAT"],["universe","UNIVERSE"],["audit","AUDIT"],["journal","JOURNAL"]];
+const TABS=[["markets","MKT"],["portfolio","PORT"],["risk","RISK"],["calendar","CAL"],["screen","SCREEN"],["agents","AGENTS"],["strats","STRAT"],["universe","UNIVERSE"],["audit","AUDIT"],["journal","JOURNAL"]];
 function nav(page,sym){S.page=page;S.sym=sym??S.sym;
   location.hash=page==="security"?`/sec/${S.sym}`:`/${page}`;
   render();$("#view").scrollTop=0}
@@ -1317,6 +1320,57 @@ function vStrats(){
     T7 broker adapters verified offline
   </div></div>`;
 }
+const SCREEN_PRESETS={all:{},value:{peMax:20},growth:{revMin:20},
+  quality:{marginMin:20},dividend:{divMin:1.5}};
+function screenRows(){
+  let rows=(S.screen||[]).slice();const f=S.screenFilters;
+  if(f.sector)rows=rows.filter(r=>r.sector===f.sector);
+  if(f.peMax!=null)rows=rows.filter(r=>r.pe!=null&&r.pe<=f.peMax&&r.pe>0);
+  if(f.mcapMin!=null)rows=rows.filter(r=>(r.market_cap||0)>=f.mcapMin*1e9);
+  if(f.revMin!=null)rows=rows.filter(r=>r.rev_growth!=null&&r.rev_growth>=f.revMin);
+  if(f.marginMin!=null)rows=rows.filter(r=>r.margin!=null&&r.margin>=f.marginMin);
+  if(f.divMin!=null)rows=rows.filter(r=>r.div_yield!=null&&r.div_yield>=f.divMin);
+  const so=S.screenSort;
+  rows.sort((a,b)=>{const av=a[so.col],bv=b[so.col];
+    if(typeof av==="string")return so.dir*String(av||"").localeCompare(String(bv||""));
+    return so.dir*((av??-1e18)-(bv??-1e18))});
+  return rows;
+}
+function vScreen(){
+  if(!S.screen)return `<div class="panel"><div class="pb mut">loading fundamental universe… (pre-warming, ~15s on first boot)</div></div>`;
+  const f=S.screenFilters,so=S.screenSort;
+  const rows=screenRows();
+  const sectors=[...new Set((S.screen||[]).map(r=>r.sector).filter(Boolean))].sort();
+  const preset=(k,l)=>`<button class="btn tiny${S.screenPreset===k?" on":""}" data-preset="${k}">${l}</button>`;
+  const numf=(k,l,ph)=>`<label class="pf">${l}<input type="number" data-sf="${k}" value="${f[k]??""}" placeholder="${ph}" style="width:56px"></label>`;
+  const cols=[["symbol","Sym","s"],["sector","Sector","s"],["market_cap","Mkt cap","v"],
+    ["pe","P/E","n"],["forward_pe","Fwd P/E","n"],["peg","PEG","n"],["rev_growth","Rev g","p"],
+    ["earnings_growth","EPS g","p"],["margin","Margin","p"],["debt_equity","D/E","n"],
+    ["beta","β","n"],["div_yield","Div","p"],["mom_252","12m","p"],["analyst","View","x"]];
+  const nn=x=>x==null?"—":(+x).toFixed(2);
+  const fp=x=>x==null?"—":(+x).toFixed(1)+"%";
+  const fmv=x=>{x=+x||0;for(const [u,dv] of [["T",1e12],["B",1e9],["M",1e6]])if(Math.abs(x)>=dv)return "$"+(x/dv).toFixed(1)+u;return "$"+x.toFixed(0)};
+  const cell=(r,c,t)=>{const v=r[c];
+    if(t==="v")return `<td class="num">${fmv(v)}</td>`;
+    if(t==="p")return `<td class="num ${(v||0)>=0?"up":"dn"}">${fp(v)}</td>`;
+    if(t==="n")return `<td class="num">${nn(v)}</td>`;
+    if(t==="x")return `<td class="${v==="buy"||v==="strong_buy"?"up":v==="sell"?"dn":"mut"}" style="font-size:10px">${(v||"—").toUpperCase()}</td>`;
+    if(c==="sector")return `<td class="mut" style="font-size:10px">${esc(v||"")}</td>`;
+    return `<td><span class="sym">${esc(v)}</span></td>`};
+  const head=cols.map(([c,l])=>`<th class="sorth" data-sscol="${c}" style="cursor:pointer;white-space:nowrap">${l}${so.col===c?(so.dir<0?" ▾":" ▴"):""}</th>`).join("");
+  const body=rows.length?rows.slice(0,300).map(r=>`<tr class="rowlink" data-resolve="${esc(r.symbol)}">${cols.map(([c,l,t])=>cell(r,c,t)).join("")}</tr>`).join("")
+    :`<tr><td colspan="14" class="mut">no matches — loosen the filters</td></tr>`;
+  return `
+  <div class="panel"><div class="ph">Fundamental screener <span class="right mut">${rows.length} of ${S.screen.length} match</span></div>
+    <div class="pb" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+      ${preset("all","All")}${preset("value","Value")}${preset("growth","Growth")}${preset("quality","Quality")}${preset("dividend","Dividend")}
+      <span class="pdiv">│</span>
+      <select id="sfSector" class="asel"><option value="">all sectors</option>${sectors.map(s=>`<option value="${esc(s)}"${f.sector===s?" selected":""}>${esc(s)}</option>`).join("")}</select>
+      ${numf("peMax","P/E ≤","")}${numf("mcapMin","Mcap ≥ $B","")}${numf("revMin","Rev g ≥ %","")}${numf("marginMin","Margin ≥ %","")}${numf("divMin","Div ≥ %","")}
+      <button class="btn tiny" id="sfClear">clear</button></div>
+    <div style="overflow-x:auto;max-height:58vh"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>
+    <div class="note"><b>Click a column to rank, a row to open.</b> Universe = sector constituents + your book + watchlist (~125 liquid names) — free fundamentals don't cover the full market. Presets set filters you can then tweak. Momentum columns come from the last daily universe scan.</div></div>`;
+}
 function vCalendar(){
   const c=S.calendar;
   if(!c)return `<div class="panel"><div class="pb mut">loading calendar…</div></div>`;
@@ -1510,7 +1564,7 @@ function fxOpen(){const d=new Date(),u=d.getUTCDay(),h=d.getUTCHours();
 
 /* ============================================================ render */
 const VIEWS={markets:vMarkets,security:vSecurity,portfolio:vPortfolio,
-  risk:vRisk,agents:vAgents,strats:vStrats,universe:vUniverse,audit:vAudit,journal:vJournals,industry:vIndustry,options:vOptions,calendar:vCalendar};
+  risk:vRisk,agents:vAgents,strats:vStrats,universe:vUniverse,audit:vAudit,journal:vJournals,industry:vIndustry,options:vOptions,calendar:vCalendar,screen:vScreen};
 function render(scroll){
   // header
   $("#modechip").className="chip "+(S.mode==="live"?"live":"demo");
@@ -1559,6 +1613,18 @@ function render(scroll){
     const fs=$("#fltStrat");if(fs)fs.onchange=()=>{S.auditStrat=fs.value;render()};
     const fa=$("#fltAsset");if(fa)fa.onchange=()=>{S.auditAsset=fa.value;render()};
     $$("[data-agent-filter]").forEach(b=>b.onclick=()=>{S.auditAgent=b.dataset.agentFilter;render()});
+  }
+  if(S.page==="screen"){
+    $$("[data-preset]").forEach(b=>b.onclick=()=>{S.screenPreset=b.dataset.preset;
+      S.screenFilters={peMax:null,mcapMin:null,revMin:null,marginMin:null,divMin:null,
+        sector:S.screenFilters.sector,...SCREEN_PRESETS[b.dataset.preset]};render()});
+    $$("[data-sf]").forEach(i=>i.onchange=()=>{const v=i.value.trim();
+      S.screenFilters[i.dataset.sf]=v===""?null:parseFloat(v);S.screenPreset="";render()});
+    const ss=$("#sfSector");if(ss)ss.onchange=()=>{S.screenFilters.sector=ss.value;render()};
+    const sc=$("#sfClear");if(sc)sc.onclick=()=>{S.screenPreset="all";
+      S.screenFilters={peMax:null,mcapMin:null,revMin:null,marginMin:null,divMin:null,sector:""};render()};
+    $$(".sorth").forEach(th=>th.onclick=()=>{const c=th.dataset.sscol;if(!c)return;
+      if(S.screenSort.col===c)S.screenSort.dir*=-1;else S.screenSort={col:c,dir:c==="symbol"||c==="sector"?1:-1};render()});
   }
   if(S.page==="universe"){
     const ur=$("#uRun");if(ur)ur.onclick=runUniverseScan;

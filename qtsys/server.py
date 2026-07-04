@@ -174,6 +174,7 @@ async def boot() -> None:
         pass
     asyncio.create_task(_tick_loop())
     asyncio.create_task(_daily_scan_loop())      # auto-run the morning scan daily
+    asyncio.create_task(_prewarm_screener())     # warm the fundamentals cache
 
 
 async def _tick_loop() -> None:
@@ -313,6 +314,54 @@ async def _news_narrative(sym: str, items: list[dict]) -> str:
                                   [it.get("headline", "") for it in items], llm)
     _NARR_CACHE[sym] = (time.time(), txt)
     return txt
+
+
+@app.get("/api/screen")
+async def screen():
+    """Fundamental screener universe: sector constituents + your book +
+    watchlist, each enriched with fundamentals (yfinance) and the last daily
+    scan's technicals. Client filters/sorts. Pre-warmed on boot for speed."""
+    return {"rows": await asyncio.to_thread(_screen_rows, state["broker"])}
+
+
+def _screen_rows(broker) -> list[dict]:
+    from . import intel, sectors, universe
+    import concurrent.futures
+    syms = set()
+    for members in sectors.CONSTITUENTS.values():
+        syms.update(members)
+    try:
+        syms.update(p.symbol for p in broker.get_positions()
+                    if "/" not in p.symbol and len(p.symbol) <= 5)
+    except Exception:
+        pass
+    syms.update(v for v in (state.get("vmap") or {}).values() if "/" not in v)
+    syms = sorted(syms)[:180]
+    tech = {i["asset"]: i for i in (universe.load_last_result("1Day") or {}).get("instruments", [])}
+
+    def one(s):
+        try:
+            return s, (intel.fundamentals(s, "Equity").get("metrics") or {})
+        except Exception:
+            return s, {}
+    rows = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=24) as ex:
+        for s, m in ex.map(one, syms):
+            if not m or not m.get("pe") and not m.get("market_cap"):
+                continue
+            t = tech.get(s, {})
+            rows.append({
+                "symbol": s, "sector": m.get("sector"), "industry": m.get("industry"),
+                "market_cap": m.get("market_cap"), "pe": m.get("pe"),
+                "forward_pe": m.get("forward_pe"), "peg": m.get("peg"),
+                "eps": m.get("eps"), "rev_growth": m.get("rev_growth_pct"),
+                "earnings_growth": m.get("earnings_growth_pct"),
+                "margin": m.get("profit_margin_pct"), "debt_equity": m.get("debt_to_equity"),
+                "beta": m.get("beta"), "div_yield": m.get("div_yield_pct"),
+                "target": m.get("target_mean"), "analyst": m.get("analyst"),
+                "mom_63": t.get("mom_63"), "mom_252": t.get("mom_252"),
+                "rvol": t.get("rvol_20")})
+    return rows
 
 
 @app.get("/api/calendar")
@@ -657,6 +706,16 @@ async def universe_scan(cap: int = 3000, tf: str = "1Day"):
 
     asyncio.create_task(_run_universe_scan(broker, watch, cap, prog, tf))
     return {"running": True, "cap": cap, "tf": tf, "watchlist": len(watch)}
+
+
+async def _prewarm_screener():
+    """Pre-fetch the screener universe's fundamentals so the SCREEN tab is
+    instant when first opened."""
+    await asyncio.sleep(20)
+    try:
+        await asyncio.to_thread(_screen_rows, state["broker"])
+    except Exception:
+        pass
 
 
 async def _daily_scan_loop():
