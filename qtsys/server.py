@@ -506,6 +506,55 @@ def strategies():
     return {"asof": os.path.getmtime(p), "rows": rows}
 
 
+@app.get("/api/audit")
+def audit():
+    """Detailed Strategy-Engineer audit: every strategy × every instrument it
+    analysed, with the per-pair outcome (trades, win rate, expectancy, PF) and
+    the strategy's DSR verdict. Plus the exact instrument set the morning
+    analysis actually covers."""
+    import csv
+
+    def num(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+    HERE_ = HERE
+    summ = {}
+    sp = os.path.join(HERE_, "registry_summary.csv")
+    if os.path.exists(sp):
+        with open(sp) as f:
+            for r in csv.DictReader(f):
+                d = num(r.get("dsr"))
+                summ[r["id"]] = {
+                    "family": r.get("family"), "dsr": d, "status": r.get("status", ""),
+                    "verdict": "pass" if (d or 0) >= 0.95 else
+                               "watch" if (d or 0) >= 0.80 else "reject",
+                    "train_exp": num(r.get("train_exp")), "test_exp": num(r.get("test_exp"))}
+    rows, assets, strategies = [], set(), set()
+    rp = os.path.join(HERE_, "registry_results.csv")
+    if os.path.exists(rp):
+        with open(rp) as f:
+            for r in csv.DictReader(f):
+                s = summ.get(r["spec"], {})
+                a = r["asset"]
+                if "/" not in a:
+                    assets.add(a)
+                strategies.add(r["spec"])
+                rows.append({
+                    "strategy": r["spec"], "asset": a, "family": s.get("family"),
+                    "n": num(r.get("n")), "win_rate": num(r.get("win_rate")),
+                    "expectancy": num(r.get("expectancy")),
+                    "profit_factor": num(r.get("profit_factor")),
+                    "dsr": s.get("dsr"), "verdict": s.get("verdict", ""),
+                    "status": s.get("status", "")})
+    rows.sort(key=lambda x: (x["expectancy"] if x["expectancy"] is not None else -9),
+              reverse=True)
+    return {"asof": os.path.getmtime(rp) if os.path.exists(rp) else None,
+            "results": rows, "universe": sorted(assets),
+            "strategies": sorted(strategies), "specs": summ}
+
+
 @app.get("/api/reports")
 def reports_list():
     """Journals/reports the agents have filed to reports/ (briefings, risk,

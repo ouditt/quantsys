@@ -172,6 +172,8 @@ tr.rowlink:hover{background:var(--panel2)}
 .pf{display:inline-flex;align-items:center;gap:3px;color:var(--mut);font-weight:400}
 .pf input{width:46px;padding:2px 4px;font-size:10.5px;background:var(--bg0);
   border:1px solid var(--line2);border-radius:3px;color:var(--fg);text-align:center}
+.asel{padding:4px 8px;font-size:11px;background:var(--bg0);border:1px solid var(--line2);
+  border-radius:4px;color:var(--fg)}
 .seg{display:flex;border:1px solid var(--line2);border-radius:4px;overflow:hidden}
 .seg button{padding:6px 12px;font-size:11px;color:var(--mut)}
 .seg button.on{background:var(--amber);color:#000;font-weight:700}
@@ -348,6 +350,7 @@ const S={
  agents:{master:true,list:[]}, alog:[],
  news:[], assetNews:{}, assetNarr:{}, newsEngine:"", fund:{}, ticket:{side:"buy",type:"market"},
  strategies:{asof:null,rows:[]}, stratOpen:null,
+ audit:{results:[],universe:[],strategies:[]}, auditStrat:"", auditAsset:"", auditAgent:"",
  reports:[], reportOpen:null, reportText:"", journalText:"",
 };
 S._nloading=new Set();S._floading=new Set();
@@ -523,6 +526,7 @@ async function liveInit(){
   try{const P=await j("/api/posture");Object.assign(POSTURE_STATS,P.stats);applyPosture(P.current,false);renderTracking(P)}
   catch(e){applyPosture(CUR_POSTURE,false)}
   try{S.strategies=await j("/api/strategies")}catch(e){}
+  try{S.audit=await j("/api/audit")}catch(e){}
   try{S.reports=(await j("/api/reports")).reports||[]}catch(e){}
   try{S.journalText=(await j("/api/journal")).text||""}catch(e){}
 }
@@ -863,7 +867,7 @@ async function toggleAgent(name,enabled){
 }
 
 /* ============================================================ views */
-const TABS=[["markets","MKT"],["portfolio","PORT"],["risk","RISK"],["agents","AGENTS"],["strats","STRAT"],["journal","JOURNAL"]];
+const TABS=[["markets","MKT"],["portfolio","PORT"],["risk","RISK"],["agents","AGENTS"],["strats","STRAT"],["audit","AUDIT"],["journal","JOURNAL"]];
 function nav(page,sym){S.page=page;S.sym=sym??S.sym;
   location.hash=page==="security"?`/sec/${S.sym}`:`/${page}`;
   render();$("#view").scrollTop=0}
@@ -1236,6 +1240,52 @@ async function loadReport(name){
   catch(e){S.reportText="(failed to load report)"}
   render();
 }
+function vAudit(){
+  const A=S.audit||{results:[],universe:[],strategies:[]};
+  const fp=x=>x==null?"—":(x*100).toFixed(2)+"%",fn=x=>x==null?"—":(+x).toFixed(2);
+  const vp=v=>v==="pass"?"up":v==="watch"?"warn":"dn";
+  const asof=A.asof?new Date(A.asof*1000).toISOString().slice(0,16).replace("T"," "):"—";
+  let rows=A.results||[];
+  if(S.auditStrat)rows=rows.filter(r=>r.strategy===S.auditStrat);
+  if(S.auditAsset)rows=rows.filter(r=>r.asset===S.auditAsset);
+  const opt=(v,cur,lbl)=>`<option value="${esc(v)}"${cur===v?" selected":""}>${esc(lbl||v||"all")}</option>`;
+  const stratSel=`<select id="fltStrat" class="asel">${opt("",S.auditStrat,"all strategies")}${(A.strategies||[]).map(s=>opt(s,S.auditStrat)).join("")}</select>`;
+  const assetSel=`<select id="fltAsset" class="asel">${opt("",S.auditAsset,"all instruments")}${(A.universe||[]).map(s=>opt(s,S.auditAsset)).join("")}</select>`;
+  const grid=rows.length?rows.map(r=>`<tr class="rowlink" data-sym="${esc(r.asset)}">
+    <td><span class="sym">${esc(r.strategy)}</span><br><span class="mut" style="font-size:10px">${esc(r.family||"")}</span></td>
+    <td><span class="sym">${esc(r.asset)}</span></td>
+    <td class="num">${r.n??"—"}</td><td class="num">${fp(r.win_rate)}</td>
+    <td class="num ${(r.expectancy||0)>=0?"up":"dn"}">${fp(r.expectancy)}</td>
+    <td class="num">${fn(r.profit_factor)}</td>
+    <td><span class="pill ${vp(r.verdict)}">${fn(r.dsr)}</span></td></tr>`).join("")
+    :`<tr><td colspan="7" class="mut">${A.results&&A.results.length?"no rows match the filter":"loading audit registry…"}</td></tr>`;
+  // agent decision log (filterable)
+  const agents=[...new Set((S.alog||[]).map(x=>x.agent))];
+  const chip=(a,l)=>`<button class="btn tiny${S.auditAgent===a?" on":""}" data-agent-filter="${esc(a)}">${esc(l||a)}</button>`;
+  let log=(S.alog||[]);if(S.auditAgent)log=log.filter(x=>x.agent===S.auditAgent);
+  return `
+  <div class="panel"><div class="ph">Morning-analysis coverage</div><div class="pb" style="font-size:11.5px;line-height:1.7">
+    The daily scan runs <b>every strategy × every instrument</b> over ${(A.universe||[]).length} instruments:
+    ${(A.universe||[]).map(s=>`<span class="pill">${esc(s)}</span>`).join(" ")}
+    <div class="mut" style="margin-top:8px">This is the <b>bundled daily-history universe</b> — NOT all Alpaca/IBKR tradables.
+    Alpaca lists thousands of equities/ETFs + crypto and IBKR is global; the engine only analyses instruments it has
+    historical daily bars for. Extending the scan to the full venue universe (pull history per symbol, run the strategy
+    grid on each) is a planned extension, not current behaviour.</div></div></div>
+
+  <div class="panel"><div class="ph">Strategy Engineer · what it analysed, per instrument
+    <span class="right mut">${rows.length} of ${(A.results||[]).length} pairs · sweep ${asof}</span></div>
+    <div class="pb" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">${stratSel}${assetSel}
+      <span class="mut" style="font-size:10.5px">click a row to open the instrument · sorted by out-of-sample expectancy</span></div>
+    <div style="overflow-x:auto;max-height:52vh"><table><thead><tr><th>Strategy</th><th>Instrument</th><th>Trades</th>
+      <th>Win rate</th><th>Expect./trade</th><th>PF</th><th>DSR gate</th></tr></thead><tbody>${grid}</tbody></table></div>
+    <div class="note">Each row is one backtest the Strategy Engineer ran: a strategy (with its parameters, encoded in the id) on one instrument, and the real out-of-sample outcome. The DSR column is the strategy's overall reliability verdict (green ≥0.95, amber 0.80–0.95, red rejected). These are last-sweep results — re-run <code>python -m qtsys.sweep</code> to refresh.</div></div>
+
+  <div class="panel"><div class="ph">Agent decision log <span class="right mut">${log.length} entries</span></div>
+    <div class="pb" style="display:flex;gap:6px;flex-wrap:wrap">${chip("","all agents")}${agents.map(a=>chip(a)).join("")}</div>
+    <div style="max-height:40vh;overflow:auto">${log.slice(0,120).map(l=>`<div class="logline ${l.level==="error"?"error":""}">
+      <span class="t">${new Date(l.ts*1000).toLocaleString([], {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"})}</span>
+      <span class="a">${esc(l.agent)}</span><span class="m">${esc(l.message)}</span></div>`).join("")||'<div class="pb mut">No decisions logged yet.</div>'}</div></div>`;
+}
 
 /* ============================================================ sessions */
 function eqOpen(){const d=new Date(),u=d.getUTCDay(),h=d.getUTCHours()+d.getUTCMinutes()/60;
@@ -1245,7 +1295,7 @@ function fxOpen(){const d=new Date(),u=d.getUTCDay(),h=d.getUTCHours();
 
 /* ============================================================ render */
 const VIEWS={markets:vMarkets,security:vSecurity,portfolio:vPortfolio,
-  risk:vRisk,agents:vAgents,strats:vStrats,journal:vJournals};
+  risk:vRisk,agents:vAgents,strats:vStrats,audit:vAudit,journal:vJournals};
 function render(scroll){
   // header
   $("#modechip").className="chip "+(S.mode==="live"?"live":"demo");
@@ -1288,6 +1338,11 @@ function render(scroll){
     $("#tsend").onclick=()=>{syncTicket();
       placeOrder(S.sym,S.ticket.side,S.ticket.qty||0,S.ticket.type,
         S.ticket.type==="limit"?(S.ticket.lp??parseFloat($("#tlp").value)):null)};
+  }
+  if(S.page==="audit"){
+    const fs=$("#fltStrat");if(fs)fs.onchange=()=>{S.auditStrat=fs.value;render()};
+    const fa=$("#fltAsset");if(fa)fa.onchange=()=>{S.auditAsset=fa.value;render()};
+    $$("[data-agent-filter]").forEach(b=>b.onclick=()=>{S.auditAgent=b.dataset.agentFilter;render()});
   }
   const master=$("#master");if(master)master.onclick=()=>toggleAgent(null,!S.agents.master);
   $$("[data-agent]").forEach(b=>b.onclick=()=>{
