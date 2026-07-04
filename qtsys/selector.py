@@ -108,51 +108,78 @@ def update_labels(bars_by_asset: dict) -> int:
 
 
 # ------------------------------------------------------------------- training
+def _purged_folds(dates_sorted, n_splits, embargo_days):
+    """Chronological date folds, purged + embargoed. A training date leaks into a
+    test fold if its forward label window [date, date+FWD_K] overlaps the test
+    span, or it sits within `embargo_days` after the test span — both excluded."""
+    import pandas as pd
+    uniq = sorted(set(dates_sorted))
+    folds = np.array_split(np.arange(len(uniq)), n_splits)
+    horizon = pd.Timedelta(days=int(FWD_K * 1.6) + 2)   # trading days -> calendar
+    emb = pd.Timedelta(days=embargo_days)
+    ts = [pd.Timestamp(x) for x in uniq]
+    for fi in folds:
+        if len(fi) == 0:
+            continue
+        t0, t1 = ts[fi[0]], ts[fi[-1]]
+        test = {uniq[i] for i in fi}
+        train = {uniq[i] for i in range(len(uniq))
+                 if (ts[i] + horizon < t0) or (ts[i] > t1 + emb)}
+        yield train, test
+
+
 def train() -> dict:
-    """Train the selector on labelled rows; time-ordered holdout for recall@K.
-    Advances the phase when the gate passes. Returns status."""
+    """Train the selector on labelled rows with PURGED, EMBARGOED K-fold CV
+    (forward-label leakage removed), report mean recall@K, advance the phase when
+    the gate passes, and fit the deployed model on all data. Returns status."""
     import pandas as pd
     d = _db()
     rows = d.execute("SELECT date,asset,feats,label FROM feat WHERE label IS NOT NULL").fetchall()
-    if len(rows) < 500 or len({r[0] for r in rows}) < 8:
+    n_days = len({r[0] for r in rows})
+    if len(rows) < 500 or n_days < 10:
         d.close()
         return status()                 # not enough labelled history yet
     df = pd.DataFrame([{"date": r[0], "asset": r[1], **json.loads(r[2]),
                         "label": r[3]} for r in rows])
-    dates = sorted(df["date"].unique())
-    cut = dates[int(len(dates) * 0.7)]
-    tr, te = df[df.date <= cut], df[df.date > cut]
-    if tr["label"].nunique() < 2 or len(te) < 50:
+    if df["label"].nunique() < 2:
         d.close()
         return status()
     from sklearn.ensemble import GradientBoostingClassifier
-    X = tr[_FEATS].to_numpy(); y = tr["label"].to_numpy()
-    clf = GradientBoostingClassifier(max_depth=3, n_estimators=150, subsample=0.8)
-    clf.fit(X, y)
-    # recall@K on the held-out days: does the top-K by score capture the goods?
-    te = te.copy(); te["score"] = clf.predict_proba(te[_FEATS].to_numpy())[:, 1]
+    n_splits = min(5, max(2, n_days // 6))
     recalls = []
-    for dt, g in te.groupby("date"):
-        goods = g[g.label == 1]
-        if not len(goods):
+    for tr_dates, te_dates in _purged_folds(df["date"].tolist(), n_splits, FWD_K + 5):
+        tr = df[df.date.isin(tr_dates)]
+        te = df[df.date.isin(te_dates)]
+        if tr["label"].nunique() < 2 or len(te) < 30 or (te.label == 1).sum() == 0:
             continue
-        k = min(SHORTLIST_K, len(g))
-        top = g.nlargest(k, "score")
-        recalls.append(len(top[top.label == 1]) / len(goods))
+        clf = GradientBoostingClassifier(max_depth=3, n_estimators=150, subsample=0.8)
+        clf.fit(tr[_FEATS].to_numpy(), tr["label"].to_numpy())
+        te = te.copy()
+        te["score"] = clf.predict_proba(te[_FEATS].to_numpy())[:, 1]
+        for _, g in te.groupby("date"):        # recall@K per held-out day
+            goods = int((g.label == 1).sum())
+            if not goods:
+                continue
+            k = min(SHORTLIST_K, len(g))
+            recalls.append(int((g.nlargest(k, "score").label == 1).sum()) / goods)
     recall = float(np.mean(recalls)) if recalls else 0.0
+    # deployed model: fit on everything
+    full = GradientBoostingClassifier(max_depth=3, n_estimators=150, subsample=0.8)
+    full.fit(df[_FEATS].to_numpy(), df["label"].to_numpy())
     import pickle
     with open(os.path.join(HERE, "universe_selector.pkl"), "wb") as f:
-        pickle.dump({"clf": clf, "feats": _FEATS}, f)
-    imp = dict(sorted(zip(_FEATS, clf.feature_importances_.round(3).tolist()),
+        pickle.dump({"clf": full, "feats": _FEATS}, f)
+    imp = dict(sorted(zip(_FEATS, full.feature_importances_.round(3).tolist()),
                       key=lambda x: -x[1]))
     _set(d, "recall_at_k", recall)
+    _set(d, "cv_folds", len(recalls))
     _set(d, "importances", imp)
     _set(d, "trained_at", time.time())
     phase = _get(d, "phase", "warmup")
     days = _get(d, "days_logged", 0)
     if days >= WARMUP_DAYS and phase == "warmup":
         _set(d, "phase", "shadow")
-    if phase in ("shadow", "active"):
+    if phase in ("shadow", "active"):       # gate governs active narrowing
         _set(d, "phase", "active" if recall >= GATE_RECALL else "shadow")
     d.commit(); d.close()
     return status()
@@ -204,6 +231,7 @@ def status() -> dict:
     out = {"phase": _get(d, "phase", "warmup"), "days_logged": days,
            "warmup_days": WARMUP_DAYS, "rows_total": total, "rows_labelled": labelled,
            "recall_at_k": _get(d, "recall_at_k"), "gate_recall": GATE_RECALL,
+           "cv_folds": _get(d, "cv_folds"),
            "shortlist_k": SHORTLIST_K, "importances": _get(d, "importances"),
            "trained_at": _get(d, "trained_at")}
     d.close()

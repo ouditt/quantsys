@@ -1231,7 +1231,7 @@ function vUniverse(){
       ${u.running?`<b>Working:</b> ${esc(u.progress||"…")}`:
         last?`Last scan: <b>${last.scanned}</b> of <b>${last.universe}</b> liquid instruments · <b>${last.n_setups}</b> fresh setups · ${last.took}s`:
         `Scans every liquid Alpaca instrument + your watchlist with the strategy grid. First run builds the ML training set.`}
-    </div></div>
+      <span class="mut" style="margin-left:6px">· runs automatically once per day (or hit the button)</span></div></div>
 
   <div class="panel"><div class="ph">ML instrument selector <span class="right"><span class="pill ${pc}">${phase.toUpperCase()}</span></span></div>
     <div class="pb"><div class="mut" style="font-size:11px;margin-bottom:8px">${phaseNote}.</div>
@@ -1246,7 +1246,7 @@ function vUniverse(){
         <div class="bar" style="flex:1"><i style="width:${(v*100)|0}%"></i></div>
         <span class="num" style="width:44px;text-align:right;font-size:10.5px">${fp(v)}</span></div>`).join("")}</div>`:""}
     <div class="pb" style="padding-top:10px"><button class="btn tiny" id="uTrain">retrain selector</button>
-      <span class="mut" style="font-size:10.5px;margin-left:8px">narrowing activates automatically once recall clears the gate on held-out days</span></div>
+      <span class="mut" style="font-size:10.5px;margin-left:8px">${sel.cv_folds?`purged/embargoed ${sel.cv_folds}-fold CV · `:""}narrowing activates automatically once recall clears the gate on held-out days</span></div>
     </div></div>
 
   ${uniTable()}`;

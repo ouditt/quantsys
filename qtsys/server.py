@@ -166,6 +166,7 @@ async def boot() -> None:
                  venue=venue, vmap=VENUE_SYMBOLS.get(venue),
                  meta={s: (n, c) for s, n, c, _ in UNIVERSE})
     asyncio.create_task(_tick_loop())
+    asyncio.create_task(_daily_scan_loop())      # auto-run the morning scan daily
 
 
 async def _tick_loop() -> None:
@@ -523,19 +524,50 @@ async def universe_scan(cap: int = 3000):
     def prog(m):
         state["uscan"]["progress"] = m
 
-    async def _job():
-        try:
-            from . import universe
-            res = await asyncio.to_thread(universe.run_scan, broker, watch,
-                                          cap, 2e6, prog)
-            state["uscan"] = {"running": False, "progress": "done",
-                              "result": res, "finished": time.time()}
-        except Exception as e:
-            state["uscan"] = {"running": False,
-                              "progress": f"error: {str(e).splitlines()[0][:160]}"}
-
-    asyncio.create_task(_job())
+    asyncio.create_task(_run_universe_scan(broker, watch, cap, prog))
     return {"running": True, "cap": cap, "watchlist": len(watch)}
+
+
+async def _daily_scan_loop():
+    """Run the full-universe scan once per calendar day, automatically, so the
+    selector's warm-up accumulates without manual clicks. Best-effort; skips if a
+    scan already ran today or one is in progress."""
+    import datetime
+    await asyncio.sleep(45)                       # let boot settle
+    broker = state.get("broker")
+    if not hasattr(broker, "history"):
+        return                                    # only on Alpaca
+    cap = int(os.environ.get("QTSYS_SCAN_CAP", "3000"))
+    while True:
+        try:
+            from . import selector
+            today = datetime.date.today().isoformat()
+            db = selector._db()
+            done = db.execute("SELECT 1 FROM feat WHERE date=? LIMIT 1",
+                              (today,)).fetchone()
+            db.close()
+            if not done and not state.get("uscan", {}).get("running"):
+                watch = [v for v in (state.get("vmap") or {}).values()]
+                state["uscan"] = {"running": True, "started": time.time(),
+                                  "progress": "auto daily scan…"}
+                await _run_universe_scan(
+                    broker, watch, cap,
+                    lambda m: state["uscan"].__setitem__("progress", m))
+        except Exception:
+            pass
+        await asyncio.sleep(3600)                 # re-check hourly
+
+
+async def _run_universe_scan(broker, watch, cap, prog):
+    try:
+        from . import universe, selector
+        res = await asyncio.to_thread(universe.run_scan, broker, watch, cap, 2e6, prog)
+        await asyncio.to_thread(selector.train)      # retrain after every scan
+        state["uscan"] = {"running": False, "progress": "done",
+                          "result": res, "finished": time.time()}
+    except Exception as e:
+        state["uscan"] = {"running": False,
+                          "progress": f"error: {str(e).splitlines()[0][:160]}"}
 
 
 @app.get("/api/universe/status")
