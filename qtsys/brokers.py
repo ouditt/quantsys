@@ -260,6 +260,7 @@ class AlpacaBroker(Broker):
                      "side": OrderSide, "tif": TimeInForce,
                      "last": StockLatestTradeRequest,
                      "last_crypto": CryptoLatestTradeRequest}
+        self._key, self._sec = api_key, secret
         self.c = TradingClient(api_key, secret, paper=paper)
         self.d = StockHistoricalDataClient(api_key, secret)
         self.dc = CryptoHistoricalDataClient(api_key, secret)
@@ -332,6 +333,27 @@ class AlpacaBroker(Broker):
             t = self.d.get_stock_latest_trade(
                 self._req["last"](symbol_or_symbols=symbol))
         return float(t[symbol].price)
+
+    def news(self, symbol: str, limit: int = 25) -> list[dict]:
+        """Real headlines for a symbol (equities & crypto) from Alpaca's news
+        feed. Crypto pairs are queried without the slash (BTC/USD -> BTCUSD)."""
+        try:
+            from alpaca.data.historical.news import NewsClient
+            from alpaca.data.requests import NewsRequest
+            if not getattr(self, "_news", None):
+                self._news = NewsClient(self._key, self._sec)
+            sym = symbol.replace("/", "") if "/" in symbol else symbol
+            res = self._news.get_news(NewsRequest(symbols=sym, limit=limit,
+                                                  include_content=False))
+            items = res.data.get("news", []) if hasattr(res, "data") else []
+            out = []
+            for a in items:
+                out.append({"ts": (a.created_at.isoformat() if a.created_at else ""),
+                            "headline": a.headline or "", "source": a.source or "",
+                            "summary": (a.summary or "")[:280], "url": a.url or ""})
+            return out
+        except Exception:
+            return []
 
     def history(self, symbol: str, n: int = 400, tf: str = "1Day") -> list[dict]:
         """OHLCV bars for any venue-served symbol (stock/ETF or crypto pair) at

@@ -249,6 +249,21 @@ def history(sym: str, bars: int = 380, tf: str = "1D"):
     return {"symbol": sym, "tf": tf, "bars": b}
 
 
+@app.get("/api/news")
+async def news(sym: str):
+    """Real headlines for the symbol being viewed (equities & crypto). Symbols
+    the venue doesn't cover (commodities/FX/index) return an empty list."""
+    broker = state["broker"]
+    if sym not in state["hist"] or not hasattr(broker, "news"):
+        return {"symbol": sym, "items": []}
+    vmap = state.get("vmap")
+    vsym = sym if vmap is None else vmap.get(sym)
+    if not vsym:                       # not venue-served (analyse-only symbol);
+        return {"symbol": sym, "items": []}   # ticker would collide, so no news
+    items = await asyncio.to_thread(broker.news, vsym, 25)
+    return {"symbol": sym, "items": items}
+
+
 @app.get("/api/quote")
 async def quote_one(sym: str):
     """Fresh single-symbol last trade — for second-by-second updates on the

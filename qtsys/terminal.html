@@ -176,6 +176,9 @@ tr.rowlink:hover{background:var(--panel2)}
 .seg button{padding:6px 12px;font-size:11px;color:var(--mut)}
 .seg button.on{background:var(--amber);color:#000;font-weight:700}
 .note{font-size:11px;color:var(--mut);padding:8px 12px;border-top:1px dashed var(--line)}
+a.logline.nl{display:flex;gap:8px;text-decoration:none;color:inherit;cursor:pointer}
+a.logline.nl:hover{background:var(--panel2)}
+a.logline.nl .src{color:var(--amber);font-size:9.5px;text-transform:uppercase;letter-spacing:.04em;margin-left:4px}
 .bar{height:7px;background:var(--bg0);border:1px solid var(--line);border-radius:4px;overflow:hidden}
 .bar i{display:block;height:100%;background:var(--amber)}
 .bar i.hot{background:var(--dn)}
@@ -343,8 +346,9 @@ const S={
  account:{equity:0,cash:0,buying_power:0,day_pnl:0,total_pnl:0,gross_exposure:0,net_exposure:0,leverage:0,drawdown:0},
  halted:false, peak:0,
  agents:{master:true,list:[]}, alog:[],
- news:[], ticket:{side:"buy",type:"market"},
+ news:[], assetNews:{}, ticket:{side:"buy",type:"market"},
 };
+S._nloading=new Set();
 try{Object.assign(S.p,JSON.parse(localStorage.getItem("qtsys_params")||"{}"))}catch(e){}
 const saveParams=()=>{try{localStorage.setItem("qtsys_params",JSON.stringify(S.p))}catch(e){}};
 
@@ -541,7 +545,8 @@ async function liveRefresh(full){
       j("/api/orders"),j("/api/agents")])).map(r=>r.status==="fulfilled"?r.value:null);
     if(qs)qs.forEach(q=>{const o=S.quotes[q.symbol]||{};o.last=q.last;o.prevClose=q.last-q.chg;o.spark=q.spark;S.quotes[q.symbol]=o});
     if(acct){Object.assign(S.account,acct);S.halted=!!acct.halted;}
-    if(pos)S.positions=pos.map(p=>({symbol:p.symbol,qty:p.qty,avg_cost:p.avg_cost}));
+    if(pos)S.positions=pos.map(p=>({symbol:p.symbol,qty:p.qty,
+      avg_cost:p.avg_price??p.avg_cost,last:p.last,mkt_value:p.mkt_value,unrealized:p.unrealized}));
     if(ords)S.orders=ords.map(o=>({id:o.id,symbol:o.symbol,side:o.side,qty:o.qty,
       type:o.type,limit_price:o.limit_price,status:o.status,ts:o.ts}));
     if(ag){S.agents.master=ag.master;S.agents.list=ag.agents;}
@@ -965,12 +970,30 @@ function vSecurity(){
     <div class="note" style="border:none;padding:8px 0 0">Every order passes these gateway checks or it is never sent.</div>
   </div></div>
 
-  <div class="panel"><div class="ph">News · ${s}</div>${
-    S.news.filter(n=>n.syms.includes(s)).map(n=>`<div class="logline">
-      <span class="t">${n.t.toTimeString().slice(0,5)}</span><span class="m">${esc(n.h)}
-      <span class="pill ${n.s>0?"up":n.s<0?"dn":""}">${n.s>0?"POS":n.s<0?"NEG":"NEU"}</span></span></div>`).join("")
-    ||`<div class="pb mut">No tagged stories.</div>`}</div>
+  <div class="panel"><div class="ph">News · ${s}<span class="right mut">${(S.assetNews[s]||[]).length||""}</span></div>
+    <div id="newsbox">${renderNews(s)}</div></div>
   </div></div>`;
+}
+function renderNews(s){
+  const items=S.assetNews[s];
+  if(items===undefined)return `<div class="pb mut">loading headlines…</div>`;
+  if(items&&items.length)return items.map(n=>{
+    const tm=n.ts?new Date(n.ts):null;const when=tm?tm.toISOString().slice(5,16).replace("T"," "):"";
+    return `<a class="logline nl"${n.url?` href="${esc(n.url)}" target="_blank" rel="noopener"`:""}>
+      <span class="t">${when}</span><span class="m">${esc(n.headline)}
+      ${n.source?`<span class="src">${esc(n.source)}</span>`:""}</span></a>`}).join("");
+  const der=S.news.filter(n=>n.syms.includes(s));
+  if(der.length)return der.map(n=>`<div class="logline"><span class="t">${n.t.toTimeString().slice(0,5)}</span>
+    <span class="m">${esc(n.h)} <span class="pill ${n.s>0?"up":n.s<0?"dn":""}">${n.s>0?"POS":n.s<0?"NEG":"NEU"}</span></span></div>`).join("");
+  return `<div class="pb mut">No headlines for ${s} on this venue — commodities, FX and index symbols have no news feed here.</div>`;
+}
+async function loadNews(s){
+  if(S.mode!=="live"||S.assetNews[s]!==undefined||S._nloading.has(s))return;
+  S._nloading.add(s);
+  try{const r=await j("/api/news?sym="+encodeURIComponent(s));S.assetNews[s]=r.items||[]}
+  catch(e){S.assetNews[s]=[]}
+  S._nloading.delete(s);
+  if(S.page==="security"&&S.sym===s){const box=$("#newsbox");if(box)box.innerHTML=renderNews(s);}
 }
 
 function vPortfolio(){
@@ -992,8 +1015,9 @@ function vPortfolio(){
   h+=`<div class="panel"><div class="ph">Positions <span class="right mut">${S.positions.length} open</span></div>
     <table><thead><tr><th>Sym</th><th>Qty</th><th>Avg cost</th><th>Last</th><th>Mkt value</th><th>Unreal P&L</th><th>Wgt</th></tr></thead><tbody>`;
   if(!S.positions.length)h+=`<tr><td colspan="7" class="mut">Flat — no open positions.</td></tr>`;
-  for(const p of S.positions){const last=S.quotes[p.symbol].last,u=(last-p.avg_cost)*p.qty,
-    mv=p.qty*last,wg=Math.abs(mv)/Math.max(S.account.gross_exposure,1)*100;
+  for(const p of S.positions){const last=(p.last??S.quotes[p.symbol]?.last??p.avg_cost),
+    u=(p.unrealized??(last-p.avg_cost)*p.qty),
+    mv=(p.mkt_value??p.qty*last),wg=Math.abs(mv)/Math.max(S.account.gross_exposure,1)*100;
     h+=`<tr class="rowlink" data-sym="${p.symbol}"><td><span class="sym">${p.symbol}</span></td>
       <td class="num">${fmt(p.qty,Math.abs(p.qty)%1?4:0)}</td>
       <td class="num">${fmt(p.avg_cost,pxd(p.symbol))}</td>
@@ -1034,8 +1058,9 @@ function vRisk(){
   const a=S.account,dd=Math.abs(a.drawdown*100);
   const ladder=[["0–5%",1,"100%"],["5–8%",0.6,"60%"],["8–12%",0.3,"30%"],["≥12%",0,"KILL"]];
   const li=dd<5?0:dd<8?1:dd<12?2:3;
-  const exp={};for(const p of S.positions){const c=META[p.symbol].cls;
-    exp[c]=(exp[c]||0)+Math.abs(p.qty*S.quotes[p.symbol].last)}
+  const exp={};for(const p of S.positions){const c=META[p.symbol]?.cls||"Other";
+    const last=(p.last??S.quotes[p.symbol]?.last??p.avg_cost);
+    exp[c]=(exp[c]||0)+Math.abs((p.mkt_value!=null?p.mkt_value:p.qty*last))}
   const gmax=Math.max(1,...Object.values(exp));
   return `
   <div class="panel"><div class="ph">Risk engine · live limits</div><div class="pb grid3">
@@ -1158,6 +1183,7 @@ function render(scroll){
   $$("canvas.spark").forEach(cv=>{const s=cv.dataset.spark,q=S.quotes[s];
     drawSpark(cv,q.spark,q.spark.at(-1)>=q.spark[0])});
   if(S.page==="security"){drawChart(S.sym);
+    loadNews(S.sym);
     if(S.gran!=="1D"&&!(S.ibars[S.sym]&&S.ibars[S.sym].length))setGran(S.gran);
     const cv=$("#chart");cv.onpointermove=chartHover;cv.onpointerleave=()=>$("#xhair").style.display="none";
     $$("[data-ind]").forEach(b=>b.onclick=()=>{const k=b.dataset.ind;
