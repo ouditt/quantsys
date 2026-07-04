@@ -351,6 +351,7 @@ const S={
  news:[], assetNews:{}, assetNarr:{}, newsEngine:"", fund:{}, ticket:{side:"buy",type:"market"},
  strategies:{asof:null,rows:[]}, stratOpen:null,
  audit:{results:[],universe:[],strategies:[]}, auditStrat:"", auditAsset:"", auditAgent:"",
+ uni:{running:false,progress:"",last:null,selector:null}, uniResults:[],
  reports:[], reportOpen:null, reportText:"", journalText:"",
 };
 S._nloading=new Set();S._floading=new Set();
@@ -527,6 +528,7 @@ async function liveInit(){
   catch(e){applyPosture(CUR_POSTURE,false)}
   try{S.strategies=await j("/api/strategies")}catch(e){}
   try{S.audit=await j("/api/audit")}catch(e){}
+  try{S.uni=await j("/api/universe/status");const r=await j("/api/universe/results");S.uniResults=r.setups||[]}catch(e){}
   try{S.reports=(await j("/api/reports")).reports||[]}catch(e){}
   try{S.journalText=(await j("/api/journal")).text||""}catch(e){}
 }
@@ -867,7 +869,7 @@ async function toggleAgent(name,enabled){
 }
 
 /* ============================================================ views */
-const TABS=[["markets","MKT"],["portfolio","PORT"],["risk","RISK"],["agents","AGENTS"],["strats","STRAT"],["audit","AUDIT"],["journal","JOURNAL"]];
+const TABS=[["markets","MKT"],["portfolio","PORT"],["risk","RISK"],["agents","AGENTS"],["strats","STRAT"],["universe","UNIVERSE"],["audit","AUDIT"],["journal","JOURNAL"]];
 function nav(page,sym){S.page=page;S.sym=sym??S.sym;
   location.hash=page==="security"?`/sec/${S.sym}`:`/${page}`;
   render();$("#view").scrollTop=0}
@@ -1211,6 +1213,63 @@ function vStrats(){
     T7 broker adapters verified offline
   </div></div>`;
 }
+function vUniverse(){
+  const u=S.uni||{}, sel=u.selector||{}, last=u.last;
+  const phase=sel.phase||"warmup";
+  const phaseNote={warmup:"scanning the FULL universe daily to build ML training data — no narrowing yet",
+    shadow:"model trained; running alongside the full scan and measuring recall — narrowing not yet applied",
+    active:"ML narrowing ACTIVE — scanning the model's shortlist + exploration quota (faster)"}[phase];
+  const pc=phase==="active"?"up":phase==="shadow"?"warn":"";
+  const imp=sel.importances||{};
+  const fp=x=>x==null?"—":(x*100).toFixed(1)+"%";
+  const rows=(S.uniResults||[]).slice(0,120).map(s=>`<tr class="rowlink" data-sym="${esc(s.asset)}">
+    <td><span class="sym">${esc(s.asset)}</span></td><td><span class="sym">${esc(s.strategy)}</span></td>
+    <td>${esc(s.family||"")}</td><td class="${s.side==="LONG"?"up":"dn"}">${s.side}</td>
+    <td class="mut">${esc(s.signal_date||"")}</td></tr>`).join("")
+    ||`<tr><td colspan="5" class="mut">No scan yet — hit "Run full scan".</td></tr>`;
+  return `
+  <div class="panel"><div class="ph">Full-universe morning scan
+    <span class="right">${u.running?`<span class="pill warn" style="color:var(--warn)">SCANNING…</span>`:
+      `<button class="btn" id="uRun">▶ Run full scan</button>`}</span></div>
+    <div class="pb" style="font-size:11.5px;line-height:1.7">
+      ${u.running?`<b>Working:</b> ${esc(u.progress||"…")}`:
+        last?`Last scan: <b>${last.scanned}</b> of <b>${last.universe}</b> liquid instruments · <b>${last.n_setups}</b> fresh setups · ${last.took}s`:
+        `Scans every liquid Alpaca instrument + your watchlist with the strategy grid. First run builds the ML training set.`}
+    </div></div>
+
+  <div class="panel"><div class="ph">ML instrument selector <span class="right"><span class="pill ${pc}">${phase.toUpperCase()}</span></span></div>
+    <div class="pb"><div class="mut" style="font-size:11px;margin-bottom:8px">${phaseNote}.</div>
+    <div class="grid3">
+      <div class="stat"><div class="k">Warm-up progress</div><div class="v num">${sel.days_logged||0}/${sel.warmup_days||30} days</div></div>
+      <div class="stat"><div class="k">Training rows</div><div class="v num">${sel.rows_labelled||0} labelled / ${sel.rows_total||0}</div></div>
+      <div class="stat"><div class="k">Recall@${sel.shortlist_k||500}</div><div class="v num">${sel.recall_at_k!=null?fp(sel.recall_at_k):"—"} <span class="mut" style="font-size:10px">gate ${fp(sel.gate_recall)}</span></div></div>
+    </div>
+    ${Object.keys(imp).length?`<div style="margin-top:10px"><div class="mut" style="font-size:10.5px;margin-bottom:4px">what the model focuses on (feature importance):</div>
+      ${Object.entries(imp).slice(0,6).map(([k,v])=>`<div style="display:flex;align-items:center;gap:8px;padding:2px 0">
+        <span class="mut" style="width:110px;font-size:10.5px">${esc(k)}</span>
+        <div class="bar" style="flex:1"><i style="width:${(v*100)|0}%"></i></div>
+        <span class="num" style="width:44px;text-align:right;font-size:10.5px">${fp(v)}</span></div>`).join("")}</div>`:""}
+    <div class="pb" style="padding-top:10px"><button class="btn tiny" id="uTrain">retrain selector</button>
+      <span class="mut" style="font-size:10.5px;margin-left:8px">narrowing activates automatically once recall clears the gate on held-out days</span></div>
+    </div></div>
+
+  <div class="panel"><div class="ph">Fresh setups <span class="right mut">${(S.uniResults||[]).length} ranked</span></div>
+    <div style="overflow-x:auto;max-height:50vh"><table><thead><tr><th>Instrument</th><th>Strategy</th><th>Family</th><th>Side</th><th>Signal date</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>
+    <div class="note">Every liquid Alpaca instrument (+ your watchlist) scanned with the single-instrument strategies. Click a row to open the instrument. The ML selector learns which instruments are worth scanning; after warm-up it narrows the set to make this ~10× faster.</div></div>`;
+}
+async function runUniverseScan(){
+  try{await j("/api/universe/scan?cap=3000",{method:"POST"});toast("full-universe scan started…");}
+  catch(e){toast(e.detail||"scan failed to start","err");}
+  pollUniverse();
+}
+async function pollUniverse(){
+  try{const st=await j("/api/universe/status");S.uni=st;
+    if(!st.running){const r=await j("/api/universe/results");S.uniResults=r.setups||[];}
+    if(S.page==="universe"&&document.activeElement.tagName!=="INPUT")render();
+    if(st.running)setTimeout(pollUniverse,2000);
+  }catch(e){}
+}
 function vJournals(){
   const reps=S.reports||[];
   const list=reps.length?reps.map(r=>{const dt=new Date(r.ts*1000).toISOString().slice(0,16).replace("T"," ");
@@ -1295,7 +1354,7 @@ function fxOpen(){const d=new Date(),u=d.getUTCDay(),h=d.getUTCHours();
 
 /* ============================================================ render */
 const VIEWS={markets:vMarkets,security:vSecurity,portfolio:vPortfolio,
-  risk:vRisk,agents:vAgents,strats:vStrats,audit:vAudit,journal:vJournals};
+  risk:vRisk,agents:vAgents,strats:vStrats,universe:vUniverse,audit:vAudit,journal:vJournals};
 function render(scroll){
   // header
   $("#modechip").className="chip "+(S.mode==="live"?"live":"demo");
@@ -1343,6 +1402,12 @@ function render(scroll){
     const fs=$("#fltStrat");if(fs)fs.onchange=()=>{S.auditStrat=fs.value;render()};
     const fa=$("#fltAsset");if(fa)fa.onchange=()=>{S.auditAsset=fa.value;render()};
     $$("[data-agent-filter]").forEach(b=>b.onclick=()=>{S.auditAgent=b.dataset.agentFilter;render()});
+  }
+  if(S.page==="universe"){
+    const ur=$("#uRun");if(ur)ur.onclick=runUniverseScan;
+    const ut=$("#uTrain");if(ut)ut.onclick=async()=>{toast("retraining selector…");
+      try{S.uni.selector=await j("/api/universe/train",{method:"POST"});render();
+        toast("selector: "+(S.uni.selector.phase||"?"),"ok")}catch(e){toast("train failed","err")}};
   }
   const master=$("#master");if(master)master.onclick=()=>toggleAgent(null,!S.agents.master);
   $$("[data-agent]").forEach(b=>b.onclick=()=>{

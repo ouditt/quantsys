@@ -10,3 +10,7 @@ venv/
 
 # runtime state (agent logs, posture kv) — regenerated on boot
 *.db
+
+# universe scan runtime data (bars cache, ML selector store/model)
+qtsys/universe_cache/
+*.pkl

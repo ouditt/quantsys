@@ -506,6 +506,63 @@ def strategies():
     return {"asof": os.path.getmtime(p), "rows": rows}
 
 
+@app.post("/api/universe/scan")
+async def universe_scan(cap: int = 3000):
+    """Kick off a full-universe morning scan in the background (liquid + your
+    watchlist). Non-blocking; poll /api/universe/status."""
+    if state.get("uscan", {}).get("running"):
+        return {"running": True, "note": "a scan is already in progress"}
+    broker = state["broker"]
+    if not hasattr(broker, "history"):
+        raise HTTPException(400, "full-universe scan needs an Alpaca venue")
+    # watchlist = resolved/mapped tradable symbols the user has pulled in
+    vmap = state.get("vmap") or {}
+    watch = [v for v in vmap.values()]
+    state["uscan"] = {"running": True, "progress": "starting…", "started": time.time()}
+
+    def prog(m):
+        state["uscan"]["progress"] = m
+
+    async def _job():
+        try:
+            from . import universe
+            res = await asyncio.to_thread(universe.run_scan, broker, watch,
+                                          cap, 2e6, prog)
+            state["uscan"] = {"running": False, "progress": "done",
+                              "result": res, "finished": time.time()}
+        except Exception as e:
+            state["uscan"] = {"running": False,
+                              "progress": f"error: {str(e).splitlines()[0][:160]}"}
+
+    asyncio.create_task(_job())
+    return {"running": True, "cap": cap, "watchlist": len(watch)}
+
+
+@app.get("/api/universe/status")
+def universe_status():
+    from . import selector
+    u = state.get("uscan", {})
+    return {"running": u.get("running", False), "progress": u.get("progress"),
+            "last": {k: u["result"][k] for k in
+                     ("phase", "universe", "scanned", "n_setups", "took", "asof")}
+            if u.get("result") else None,
+            "selector": selector.status()}
+
+
+@app.get("/api/universe/results")
+def universe_results():
+    u = state.get("uscan", {})
+    return {"setups": (u.get("result") or {}).get("setups", [])}
+
+
+@app.post("/api/universe/train")
+def universe_train():
+    """Retrain the ML selector on accumulated scan history (advances the phase
+    once the recall gate passes)."""
+    from . import selector
+    return selector.train()
+
+
 @app.get("/api/audit")
 def audit():
     """Detailed Strategy-Engineer audit: every strategy × every instrument it
