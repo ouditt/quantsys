@@ -353,7 +353,7 @@ const S={
  agents:{master:true,list:[]}, alog:[],
  news:[], assetNews:{}, assetNarr:{}, newsEngine:"", fund:{}, ticket:{side:"buy",type:"market"},
  industry:null, industryFor:null,
- options:null, optionsFor:null, optExp:"",
+ options:null, optionsFor:null, optExp:"", calendar:null,
  strategies:{asof:null,rows:[]}, stratOpen:null,
  audit:{results:[],universe:[],strategies:[]}, auditStrat:"", auditAsset:"", auditAgent:"",
  uni:{running:false,progress:"",last:null,selector:null}, uniResults:[], uniInstruments:[],
@@ -535,6 +535,7 @@ async function liveInit(){
   try{S.strategies=await j("/api/strategies")}catch(e){}
   try{S.audit=await j("/api/audit")}catch(e){}
   try{S.uni=await j("/api/universe/status");const r=await j("/api/universe/results");S.uniResults=r.setups||[];S.uniInstruments=r.instruments||[]}catch(e){}
+  j("/api/calendar").then(c=>{S.calendar=c;if(S.page==="calendar")render()}).catch(()=>{});
   try{S.reports=(await j("/api/reports")).reports||[]}catch(e){}
   try{S.journalText=(await j("/api/journal")).text||""}catch(e){}
 }
@@ -875,7 +876,7 @@ async function toggleAgent(name,enabled){
 }
 
 /* ============================================================ views */
-const TABS=[["markets","MKT"],["portfolio","PORT"],["risk","RISK"],["agents","AGENTS"],["strats","STRAT"],["universe","UNIVERSE"],["audit","AUDIT"],["journal","JOURNAL"]];
+const TABS=[["markets","MKT"],["portfolio","PORT"],["risk","RISK"],["calendar","CAL"],["agents","AGENTS"],["strats","STRAT"],["universe","UNIVERSE"],["audit","AUDIT"],["journal","JOURNAL"]];
 function nav(page,sym){S.page=page;S.sym=sym??S.sym;
   location.hash=page==="security"?`/sec/${S.sym}`:`/${page}`;
   render();$("#view").scrollTop=0}
@@ -1316,6 +1317,33 @@ function vStrats(){
     T7 broker adapters verified offline
   </div></div>`;
 }
+function vCalendar(){
+  const c=S.calendar;
+  if(!c)return `<div class="panel"><div class="pb mut">loading calendar…</div></div>`;
+  const today=new Date().toISOString().slice(0,10);
+  const dchip=d=>{const days=Math.round((new Date(d)-new Date(today))/864e5);
+    return `<span class="pill ${days<=1?"warn":""}" style="${days<=1?"color:var(--warn)":""}">${d===today?"TODAY":days===1?"tomorrow":d}</span>`};
+  const econ=(c.economic||[]).map(e=>`<tr><td>${dchip(e.date)}</td><td>${esc(e.name)}</td></tr>`).join("")
+    ||`<tr><td colspan="2" class="mut">no upcoming releases (set FRED_API_KEY for the econ feed)</td></tr>`;
+  const earn=(c.earnings||[]).map(e=>`<tr class="rowlink" data-resolve="${esc(e.symbol)}"><td>${dchip(e.date)}</td>
+    <td><span class="sym">${esc(e.symbol)}</span></td><td class="num mut">${e.eps_low!=null&&e.eps_high!=null?"EPS "+(+e.eps_low).toFixed(2)+"–"+(+e.eps_high).toFixed(2):""}</td></tr>`).join("")
+    ||`<tr><td colspan="3" class="mut">no upcoming earnings in your set</td></tr>`;
+  const divs=(c.dividends||[]).map(e=>`<tr class="rowlink" data-resolve="${esc(e.symbol)}"><td>${dchip(e.ex_date)}</td>
+    <td><span class="sym">${esc(e.symbol)}</span></td><td class="mut">${e.pay_date?"pay "+e.pay_date:""}</td></tr>`).join("")
+    ||`<tr><td colspan="3" class="mut">no upcoming ex-dividend dates in your set</td></tr>`;
+  return `
+  <div class="panel"><div class="ph">Economic releases <span class="right mut">US macro · next 45d</span></div>
+    <table><thead><tr><th style="width:120px">When</th><th>Release</th></tr></thead><tbody>${econ}</tbody></table>
+    <div class="note">Scheduled US macro releases from the FRED feed (dates approximate for forward events). Highlighted = today/tomorrow.</div></div>
+  <div class="cols"><div>
+    <div class="panel"><div class="ph">Earnings <span class="right mut">your book + bellwethers</span></div>
+      <table><thead><tr><th style="width:110px">When</th><th>Symbol</th><th>Est.</th></tr></thead><tbody>${earn}</tbody></table></div>
+  </div><div>
+    <div class="panel"><div class="ph">Ex-dividend dates</div>
+      <table><thead><tr><th style="width:110px">Ex-date</th><th>Symbol</th><th>Pay date</th></tr></thead><tbody>${divs}</tbody></table></div>
+  </div></div>
+  <div class="note">Earnings & dividend dates (yfinance) for your held positions, watchlist, and sector bellwethers. Click a symbol to open it.</div>`;
+}
 function vUniverse(){
   const u=S.uni||{}, sel=u.selector||{}, last=u.last;
   const phase=sel.phase||"warmup";
@@ -1482,7 +1510,7 @@ function fxOpen(){const d=new Date(),u=d.getUTCDay(),h=d.getUTCHours();
 
 /* ============================================================ render */
 const VIEWS={markets:vMarkets,security:vSecurity,portfolio:vPortfolio,
-  risk:vRisk,agents:vAgents,strats:vStrats,universe:vUniverse,audit:vAudit,journal:vJournals,industry:vIndustry,options:vOptions};
+  risk:vRisk,agents:vAgents,strats:vStrats,universe:vUniverse,audit:vAudit,journal:vJournals,industry:vIndustry,options:vOptions,calendar:vCalendar};
 function render(scroll){
   // header
   $("#modechip").className="chip "+(S.mode==="live"?"live":"demo");

@@ -315,6 +315,26 @@ async def _news_narrative(sym: str, items: list[dict]) -> str:
     return txt
 
 
+@app.get("/api/calendar")
+async def calendar():
+    """Economic releases (FRED) + earnings/dividend dates (yfinance) for your
+    held positions, watchlist, and sector bellwethers."""
+    from . import calendars, sectors
+    syms = set()
+    try:
+        syms.update(p.symbol for p in state["broker"].get_positions()
+                    if "/" not in p.symbol and len(p.symbol) <= 5)
+    except Exception:
+        pass
+    syms.update(v for v in (state.get("vmap") or {}).values() if "/" not in v)
+    for members in sectors.CONSTITUENTS.values():
+        syms.update(members[:4])                 # a few bellwethers per sector
+    econ = await asyncio.to_thread(calendars.economic)
+    corp = await asyncio.to_thread(calendars.corporate, list(syms))
+    return {"economic": econ, "earnings": corp.get("earnings", []),
+            "dividends": corp.get("dividends", [])}
+
+
 @app.get("/api/options/{sym}")
 async def options_chain(sym: str, exp: str = ""):
     """Live option chain for an underlying, greeks/IV enriched. Grouped by
