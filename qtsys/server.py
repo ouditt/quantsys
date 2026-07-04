@@ -162,6 +162,9 @@ async def boot() -> None:
     from . import intel as _intel
     daemon.context["fundamentals"] = lambda s: _intel.fundamentals(s, _clsname(s))
     daemon.context["news"] = lambda s: _intel.news(s, _clsname(s))
+    from . import filings as _filings         # SEC EDGAR primary disclosure
+    daemon.context["filings"] = lambda s: _filings.filings(s, forms=_filings.MATERIAL_FORMS)
+    daemon.context["filing_summary"] = lambda s: _filings.summary(s, daemon.llm_fn)
     state.update(broker=broker, gw=gw, hist=hist, daemon=daemon,
                  venue=venue, vmap=VENUE_SYMBOLS.get(venue),
                  meta={s: (n, c) for s, n, c, _ in UNIVERSE})
@@ -316,6 +319,23 @@ async def _news_narrative(sym: str, items: list[dict]) -> str:
                                   [it.get("headline", "") for it in items], llm)
     _NARR_CACHE[sym] = (time.time(), txt)
     return txt
+
+
+@app.get("/api/filings")
+async def filings_api(sym: str, summarize: bool = False):
+    """Recent SEC EDGAR filings for an equity (primary official disclosure),
+    newest first. `summarize=true` adds an LLM brief of the latest material
+    10-K/10-Q/8-K. Crypto/FX have no CIK and return an empty list."""
+    from . import filings as _f
+    rows = await asyncio.to_thread(_f.filings, sym, _f.MATERIAL_FORMS, 20)
+    ent = await asyncio.to_thread(_f.cik_for, sym)
+    out = {"symbol": sym, "cik": ent["cik"] if ent else None,
+           "issuer": ent["name"] if ent else None, "items": rows}
+    if summarize and rows:
+        llm = getattr(state.get("daemon"), "llm_fn", None)
+        out["summary"] = await asyncio.to_thread(
+            _f.summary, sym, llm, ("10-K", "10-Q", "8-K"))
+    return out
 
 
 _ALERTS_FILE = os.path.join(HERE, "universe_cache", "alerts.json")

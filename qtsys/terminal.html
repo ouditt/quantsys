@@ -365,7 +365,8 @@ const S={
  dataFields:null, dataSyms:"AAPL, MSFT, NVDA, BTC/USD",
  dataSel:["last","chg_pct","rsi14","mom_252","pe","sector"], dataRows:null, dataBusy:false,
 };
-S._nloading=new Set();S._floading=new Set();
+S.filings={}; S.filingSum={};
+S._nloading=new Set();S._floading=new Set();S._flgloading=new Set();
 try{Object.assign(S.p,JSON.parse(localStorage.getItem("qtsys_params")||"{}"))}catch(e){}
 const saveParams=()=>{try{localStorage.setItem("qtsys_params",JSON.stringify(S.p))}catch(e){}};
 
@@ -893,7 +894,7 @@ const TABS=[["markets","MKT"],["portfolio","PORT"],["risk","RISK"],["calendar","
 function nav(page,sym){S.page=page;S.sym=sym??S.sym;
   location.hash=page==="security"?`/sec/${S.sym}`:`/${page}`;
   render();$("#view").scrollTop=0}
-function chgOf(s){const q=S.quotes[s];return (q.last/q.prevClose-1)*100}
+function chgOf(s){const q=S.quotes[s];if(!q||!q.prevClose)return 0;return (q.last/q.prevClose-1)*100}
 
 function vMarkets(){
   let h="";
@@ -1017,7 +1018,48 @@ function vSecurity(){
     const p=it.filter(n=>n.sentiment==="pos").length,ng=it.filter(n=>n.sentiment==="neg").length;
     return `<span class="right mut"><span class="up">${p}▲</span> <span class="dn">${ng}▼</span> · ${it.length}</span>`})()}</div>
     <div id="newsbox">${renderNews(s)}</div></div>
+
+  <div class="panel"><div class="ph">SEC Filings · ${s}
+    <span class="right"><button class="btn tiny ghost" id="filSum">AI summary</button></span></div>
+    <div id="filbox">${renderFilings(s)}</div></div>
   </div></div>`;
+}
+const FORM_TAG={"10-K":"up","10-Q":"up","8-K":"amber","4":"","144":"","DEF 14A":""};
+function renderFilings(s){
+  const f=S.filings[s];
+  if(f===undefined)return `<div class="pb mut">loading filings…</div>`;
+  if(!f||!f.items||!f.items.length)return `<div class="pb mut">No SEC filings for ${s} — non-US or crypto/FX symbols have no EDGAR CIK.</div>`;
+  const sum=S.filingSum[s];
+  const sumHtml=sum===undefined?"":(sum&&sum.summary?
+    `<div class="pb" style="border-bottom:1px dashed var(--line);font-size:11.5px;line-height:1.6">
+      <span class="pill" style="border-color:var(--amber);color:var(--amber)">AI READ · ${esc(sum.form)} ${esc(sum.date)}</span>
+      ${esc(sum.summary).replace(/\n/g,"<br>")}</div>`
+    :`<div class="pb mut" style="border-bottom:1px dashed var(--line)">no LLM backend for summary</div>`);
+  const rows=f.items.slice(0,15).map(x=>{
+    const tg=FORM_TAG[x.form]||"";
+    return `<a class="logline nl" href="${esc(x.url)}" target="_blank" rel="noopener">
+      <span class="t">${esc(x.date)}</span><span class="m">
+      <span class="pill ${tg}" style="min-width:44px;text-align:center">${esc(x.form)}</span>
+      ${esc(x.title||x.form)}</span></a>`}).join("");
+  const hdr=f.issuer?`<div class="pb mut" style="font-size:10.5px">${esc(f.issuer)} · CIK ${f.cik} · source: SEC EDGAR</div>`:"";
+  return sumHtml+hdr+rows;
+}
+async function loadFilings(s){
+  if(S.mode!=="live"||S.filings[s]!==undefined||S._flgloading.has(s))return;
+  S._flgloading.add(s);
+  try{S.filings[s]=await j("/api/filings?sym="+encodeURIComponent(s));}
+  catch(e){S.filings[s]={items:[]}}
+  S._flgloading.delete(s);
+  if(S.page==="security"&&S.sym===s){const b=$("#filbox");if(b)b.innerHTML=renderFilings(s);}
+}
+async function summarizeFilings(s){
+  if(S.filingSum[s]&&S.filingSum[s]._loading)return;
+  S.filingSum[s]={_loading:true};const b=$("#filbox");
+  if(b)b.innerHTML=`<div class="pb mut">reading latest filing + summarising…</div>`+b.innerHTML;
+  try{const r=await j("/api/filings?sym="+encodeURIComponent(s)+"&summarize=true");
+    S.filings[s]=r;S.filingSum[s]=r.summary||{summary:""};}
+  catch(e){S.filingSum[s]={summary:""};toast("summary failed","err")}
+  if(S.page==="security"&&S.sym===s){const bb=$("#filbox");if(bb)bb.innerHTML=renderFilings(s);}
 }
 function renderFund(s){
   const f=S.fund[s];
@@ -1711,7 +1753,8 @@ function render(scroll){
     drawSpark(cv,q.spark,q.spark.at(-1)>=q.spark[0])});
   if(S.page==="industry")drawPie();
   if(S.page==="security"){drawChart(S.sym);
-    loadNews(S.sym);loadFund(S.sym);
+    loadNews(S.sym);loadFund(S.sym);loadFilings(S.sym);
+    const fsm=$("#filSum");if(fsm)fsm.onclick=()=>summarizeFilings(S.sym);
     if(S.gran!=="1D"&&!(S.ibars[S.sym]&&S.ibars[S.sym].length))setGran(S.gran);
     const cv=$("#chart");cv.onpointermove=chartHover;cv.onpointerleave=()=>$("#xhair").style.display="none";
     $$("[data-ind]").forEach(b=>b.onclick=()=>{const k=b.dataset.ind;
