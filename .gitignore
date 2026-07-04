@@ -14,3 +14,4 @@ venv/
 # universe scan runtime data (bars cache, ML selector store/model)
 qtsys/universe_cache/
 *.pkl
+qtsys/registry_results_*.csv

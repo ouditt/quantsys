@@ -158,7 +158,7 @@ def scan_universe(bars: dict[str, pd.DataFrame], fresh_bars=5, workers=None):
     from .strategies import REGISTRY
     specs = [s for s in REGISTRY if s.kind == "single"]
     items = list(bars.items())
-    setups, feats = [], []
+    setups, feats, attribution = [], [], []
     for sym, df in items:
         try:
             r = _scan_one(sym, df, specs, fresh_bars)
@@ -166,21 +166,38 @@ def scan_universe(bars: dict[str, pd.DataFrame], fresh_bars=5, workers=None):
             continue
         setups += r["setups"]
         feats.append(r["features"])
+        attribution += r["attribution"]
     setups.sort(key=lambda x: x.get("hist_exp", -9) if x.get("hist_exp") is not None
                 else -9, reverse=True)
-    return setups, feats
+    return setups, feats, attribution
 
 
 def _scan_one(sym, df, specs, fresh_bars):
+    from .backtest import simulate_trades, US_EQUITY_FEES, CRYPTO_FEES
+    from .metrics import trade_stats
+    fees = CRYPTO_FEES if "/" in sym else US_EQUITY_FEES
     c = df["close"]
     n = len(c)
     setups = []
     n_signals = 0
+    attribution = []
     for spec in specs:
         try:
             evs = spec.fn(df, sym, **spec.params)
         except Exception:
             continue
+        exp = None
+        try:                                       # per (strategy, asset) backtest
+            trades = simulate_trades(df, evs, spec.barriers, fees)
+            if trades:
+                st = trade_stats(np.array([t.net_ret for t in trades]))
+                exp = _fin(st.expectancy)
+                attribution.append({"spec": spec.id, "asset": sym, "n": int(st.n),
+                                    "win_rate": _fin(st.win_rate),
+                                    "expectancy": exp,
+                                    "profit_factor": _fin(st.profit_factor, 999.0)})
+        except Exception:
+            pass
         for e in evs:
             n_signals += 1
             if e.i_signal >= n - fresh_bars:
@@ -188,7 +205,7 @@ def _scan_one(sym, df, specs, fresh_bars):
                                "family": spec.family,
                                "side": "LONG" if e.side > 0 else "SHORT",
                                "signal_date": str(df.index[e.i_signal].date()),
-                               "hist_exp": None})
+                               "hist_exp": exp})
     # per-instrument features for the ML selector (point-in-time as of last bar)
     ret = c.pct_change()
     net = sum(1 if s["side"] == "LONG" else -1 for s in setups)
@@ -206,7 +223,7 @@ def _scan_one(sym, df, specs, fresh_bars):
         "fresh": sorted({s["strategy"] for s in setups}),
         "net_side": "LONG" if net > 0 else "SHORT" if net < 0 else "—",
     }
-    return {"setups": setups, "features": feats}
+    return {"setups": setups, "features": feats, "attribution": attribution}
 
 
 # ------------------------------------------------------- morning orchestration
@@ -237,22 +254,83 @@ def run_scan(broker, watchlist=(), cap=3000, min_dollar_vol=2e6,
     prog(f"fetching {tf} bars for {len(scan_syms)} instruments…")
     bars = fetch_bars(broker, scan_syms, n=n_bars, tf=tf)
     prog(f"scanning {len(bars)} instruments ({tf})…")
-    setups, feats = scan_universe(bars)
+    setups, feats, attribution = scan_universe(bars)
     for s in setups:
         s["tf"] = tf
+    prog("saving registry attribution…")
+    _merge_registry(attribution, tf)          # persist per (strategy,asset) stats
     labelled = 0
-    if tf == "1Day":                                  # ML trains on daily only
+    if tf == "1Day":                          # ML trains on daily only
         day = _date.today().isoformat()
         selector.log_scan(day, feats, setups)
         labelled = selector.update_labels(bars)
+    res = {"asof": time.time(), "tf": tf, "phase": st["phase"], "universe": len(liq),
+           "scanned": len(bars), "n_setups": len(setups), "n_attribution": len(attribution),
+           "setups": setups[:200], "instruments": feats, "labelled_now": labelled,
+           "took": round(time.time() - t0, 1), "selector": selector.status()}
+    _persist_result(res, tf)                  # survive restarts
     prog("done")
-    return {"asof": time.time(), "tf": tf, "phase": st["phase"], "universe": len(liq),
-            "scanned": len(bars), "n_setups": len(setups),
-            "setups": setups[:200], "instruments": feats, "labelled_now": labelled,
-            "took": round(time.time() - t0, 1), "selector": selector.status()}
+    return res
+
+
+def _merge_registry(attribution, tf):
+    """Append/update the universe scan's per (strategy, asset) attribution into
+    registry_results.csv (daily) or registry_results_<tf>.csv (intraday). Existing
+    rows for the same (spec, asset) are replaced; all others (incl. the bundled
+    commodity/FX pairs) are preserved."""
+    if not attribution:
+        return
+    fname = "registry_results.csv" if tf == "1Day" else f"registry_results_{tf}.csv"
+    path = os.path.join(HERE, fname)
+    new = pd.DataFrame(attribution)
+    try:
+        if os.path.exists(path):
+            old = pd.read_csv(path)
+            nk = set(new["spec"].astype(str) + "|" + new["asset"].astype(str))
+            keep = ~(old["spec"].astype(str) + "|" + old["asset"].astype(str)).isin(nk)
+            merged = pd.concat([old[keep], new], ignore_index=True)
+        else:
+            merged = new
+        merged.to_csv(path, index=False)
+    except Exception:
+        new.to_csv(path, index=False)
+
+
+def _persist_result(res, tf):
+    import json
+    try:
+        light = {k: v for k, v in res.items() if k != "instruments"}
+        light["instruments"] = res.get("instruments", [])
+        with open(os.path.join(CACHE, f"last_scan_{tf}.json"), "w") as f:
+            json.dump(light, f)
+    except Exception:
+        pass
+
+
+def load_last_result(tf="1Day"):
+    import json
+    try:
+        with open(os.path.join(CACHE, f"last_scan_{tf}.json")) as f:
+            return json.load(f)
+    except Exception:
+        return None
 
 
 # ------------------------------------------------------------------- helpers
+def _fin(x, cap=None):
+    """Finite float, or None — keeps inf/nan out of the CSV and JSON."""
+    import math
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(v):
+        return None
+    if math.isinf(v):
+        return cap if cap is not None else None
+    return v
+
+
 def _safe(sym):
     return sym.replace("/", "_")
 
