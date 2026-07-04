@@ -970,7 +970,9 @@ function vSecurity(){
     <div class="note" style="border:none;padding:8px 0 0">Every order passes these gateway checks or it is never sent.</div>
   </div></div>
 
-  <div class="panel"><div class="ph">News · ${s}<span class="right mut">${(S.assetNews[s]||[]).length||""}</span></div>
+  <div class="panel"><div class="ph">News · ${s}${(()=>{const it=S.assetNews[s]||[];if(!it.length)return "";
+    const p=it.filter(n=>n.sentiment==="pos").length,ng=it.filter(n=>n.sentiment==="neg").length;
+    return `<span class="right mut"><span class="up">${p}▲</span> <span class="dn">${ng}▼</span> · ${it.length}</span>`})()}</div>
     <div id="newsbox">${renderNews(s)}</div></div>
   </div></div>`;
 }
@@ -979,8 +981,10 @@ function renderNews(s){
   if(items===undefined)return `<div class="pb mut">loading headlines…</div>`;
   if(items&&items.length)return items.map(n=>{
     const tm=n.ts?new Date(n.ts):null;const when=tm?tm.toISOString().slice(5,16).replace("T"," "):"";
+    const sc=n.sentiment||"neu",lbl=sc==="pos"?"POS":sc==="neg"?"NEG":"NEU";
+    const pc=sc==="pos"?"up":sc==="neg"?"dn":"";
     return `<a class="logline nl"${n.url?` href="${esc(n.url)}" target="_blank" rel="noopener"`:""}>
-      <span class="t">${when}</span><span class="m">${esc(n.headline)}
+      <span class="t">${when}</span><span class="m"><span class="pill ${pc}" title="finance-lexicon sentiment (score ${n.sent_score??0})">${lbl}</span> ${esc(n.headline)}
       ${n.source?`<span class="src">${esc(n.source)}</span>`:""}</span></a>`}).join("");
   const der=S.news.filter(n=>n.syms.includes(s));
   if(der.length)return der.map(n=>`<div class="logline"><span class="t">${n.t.toTimeString().slice(0,5)}</span>
@@ -993,7 +997,10 @@ async function loadNews(s){
   try{const r=await j("/api/news?sym="+encodeURIComponent(s));S.assetNews[s]=r.items||[]}
   catch(e){S.assetNews[s]=[]}
   S._nloading.delete(s);
-  if(S.page==="security"&&S.sym===s){const box=$("#newsbox");if(box)box.innerHTML=renderNews(s);}
+  if(S.page==="security"&&S.sym===s){
+    if(document.activeElement.tagName!=="INPUT")render();   // refresh header tally + pills
+    else{const box=$("#newsbox");if(box)box.innerHTML=renderNews(s);}
+  }
 }
 
 function vPortfolio(){

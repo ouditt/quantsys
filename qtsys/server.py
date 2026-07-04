@@ -261,6 +261,10 @@ async def news(sym: str):
     if not vsym:                       # not venue-served (analyse-only symbol);
         return {"symbol": sym, "items": []}   # ticker would collide, so no news
     items = await asyncio.to_thread(broker.news, vsym, 25)
+    from .sentiment import score
+    for it in items:                   # tag each headline pos/neg/neu
+        lbl, net = score((it.get("headline", "") + " " + it.get("summary", "")))
+        it["sentiment"], it["sent_score"] = lbl, net
     return {"symbol": sym, "items": items}
 
 
