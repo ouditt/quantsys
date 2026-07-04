@@ -80,15 +80,21 @@ def liquid_universe(broker, symbols, min_price=1.0, min_dollar_vol=2e6,
 
 
 # ------------------------------------------------------------------ batch bars
-def fetch_bars(broker, symbols, days=400, use_cache=True) -> dict[str, pd.DataFrame]:
-    """Daily OHLCV per symbol via multi-symbol requests, cached to disk (parquet).
-    Returns {sym: DataFrame(index=date, cols=open/high/low/close/volume)}."""
+_TF_FRAMES = {"1Min": (1, "Minute"), "5Min": (5, "Minute"), "15Min": (15, "Minute"),
+              "1Hour": (1, "Hour"), "1Day": (1, "Day")}
+_PER_DAY = {"1Min": 390, "5Min": 78, "15Min": 26, "1Hour": 7, "1Day": 1}
+
+
+def fetch_bars(broker, symbols, n=400, tf="1Day", use_cache=True) -> dict[str, pd.DataFrame]:
+    """OHLCV per symbol at any timeframe via multi-symbol requests, disk-cached
+    (parquet, keyed by tf). Returns {sym: DataFrame(index=ts, OHLCV)}."""
     os.makedirs(CACHE, exist_ok=True)
+    ttl = 20 if tf == "1Day" else 2                # intraday bars go stale fast
     out: dict[str, pd.DataFrame] = {}
     todo = []
     for s in symbols:
-        fp = os.path.join(CACHE, _safe(s) + ".parquet")
-        if use_cache and os.path.exists(fp) and _fresh(fp):
+        fp = os.path.join(CACHE, _safe(s) + "_" + tf + ".parquet")
+        if use_cache and os.path.exists(fp) and _fresh(fp, ttl):
             try:
                 out[s] = pd.read_parquet(fp)
                 continue
@@ -97,43 +103,49 @@ def fetch_bars(broker, symbols, days=400, use_cache=True) -> dict[str, pd.DataFr
         todo.append(s)
     eq = [s for s in todo if "/" not in s]
     cry = [s for s in todo if "/" in s]
-    _fetch_into(broker, eq, days, out, crypto=False)
-    _fetch_into(broker, cry, days, out, crypto=True)
+    _fetch_into(broker, eq, n, out, False, tf)
+    _fetch_into(broker, cry, n, out, True, tf)
     return out
 
 
-def _fetch_into(broker, symbols, days, out, crypto):
+def _fetch_into(broker, symbols, n, out, crypto, tf):
     if not symbols:
         return
     from datetime import datetime, timedelta, timezone
-    from alpaca.data.timeframe import TimeFrame
-    start = datetime.now(timezone.utc) - timedelta(days=int(days * 1.7) + 7)
-    step = 200
+    from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+    amt, unit = _TF_FRAMES.get(tf, (1, "Day"))
+    frame = TimeFrame(amt, getattr(TimeFrameUnit, unit))
+    per = _PER_DAY.get(tf, 1)
+    span = int(n * 1.7) + 7 if tf == "1Day" else max(2, int(n / per * 1.6) + 3)
+    start = datetime.now(timezone.utc) - timedelta(days=span)
+    intraday = tf != "1Day"
+    step = 200 if not intraday else 40        # bound intraday response size
     for i in range(0, len(symbols), step):
         chunk = symbols[i:i + step]
         try:
             if crypto:
                 from alpaca.data.requests import CryptoBarsRequest
                 bs = broker.dc.get_crypto_bars(CryptoBarsRequest(
-                    symbol_or_symbols=chunk, timeframe=TimeFrame.Day, start=start))
+                    symbol_or_symbols=chunk, timeframe=frame, start=start))
             else:
                 from alpaca.data.requests import StockBarsRequest
                 bs = broker.d.get_stock_bars(StockBarsRequest(
-                    symbol_or_symbols=chunk, timeframe=TimeFrame.Day, start=start))
+                    symbol_or_symbols=chunk, timeframe=frame, start=start))
         except Exception:
             continue
         data = getattr(bs, "data", {}) or {}
         for sym, rows in data.items():
-            df = pd.DataFrame([{"date": b.timestamp.date(), "open": float(b.open),
+            df = pd.DataFrame([{"ts": b.timestamp, "open": float(b.open),
                                 "high": float(b.high), "low": float(b.low),
                                 "close": float(b.close), "volume": float(b.volume)}
                                for b in rows])
             if len(df) < 60:
                 continue
-            df = df.set_index(pd.to_datetime(df["date"])).drop(columns="date")
-            out[sym] = df
+            idx = pd.to_datetime(df["ts"]) if intraday else pd.to_datetime(df["ts"].dt.date)
+            df = df.set_index(idx).drop(columns="ts")
+            out[sym] = df.tail(n)
             try:
-                df.to_parquet(os.path.join(CACHE, _safe(sym) + ".parquet"))
+                df.tail(n).to_parquet(os.path.join(CACHE, _safe(sym) + "_" + tf + ".parquet"))
             except Exception:
                 pass
 
@@ -199,9 +211,10 @@ def _scan_one(sym, df, specs, fresh_bars):
 
 # ------------------------------------------------------- morning orchestration
 def run_scan(broker, watchlist=(), cap=3000, min_dollar_vol=2e6,
-             on_progress=None) -> dict:
-    """Full morning pipeline: enumerate → liquidity-filter → (ML narrow if active)
-    → batch-fetch → scan → log for the selector. Returns results + selector status."""
+             on_progress=None, tf="1Day") -> dict:
+    """Full morning pipeline at any timeframe: enumerate → liquidity-filter →
+    (ML narrow if active) → batch-fetch bars at `tf` → scan → log (daily only,
+    to keep the ML selector's label horizon consistent). Returns results."""
     from datetime import date as _date
     from . import selector
     t0 = time.time()
@@ -220,15 +233,20 @@ def run_scan(broker, watchlist=(), cap=3000, min_dollar_vol=2e6,
         if last:
             picks, _ = selector.shortlist([dict(asset=a, **f) for a, f in last.items()])
             scan_syms = [s for s in picks if s in set(liq)] or liq
-    prog(f"fetching bars for {len(scan_syms)} instruments…")
-    bars = fetch_bars(broker, scan_syms, days=400)
-    prog(f"scanning {len(bars)} instruments…")
+    n_bars = 400 if tf == "1Day" else 250     # fewer bars per symbol intraday
+    prog(f"fetching {tf} bars for {len(scan_syms)} instruments…")
+    bars = fetch_bars(broker, scan_syms, n=n_bars, tf=tf)
+    prog(f"scanning {len(bars)} instruments ({tf})…")
     setups, feats = scan_universe(bars)
-    day = _date.today().isoformat()
-    selector.log_scan(day, feats, setups)
-    labelled = selector.update_labels(bars)
+    for s in setups:
+        s["tf"] = tf
+    labelled = 0
+    if tf == "1Day":                                  # ML trains on daily only
+        day = _date.today().isoformat()
+        selector.log_scan(day, feats, setups)
+        labelled = selector.update_labels(bars)
     prog("done")
-    return {"asof": time.time(), "phase": st["phase"], "universe": len(liq),
+    return {"asof": time.time(), "tf": tf, "phase": st["phase"], "universe": len(liq),
             "scanned": len(bars), "n_setups": len(setups),
             "setups": setups[:200], "instruments": feats, "labelled_now": labelled,
             "took": round(time.time() - t0, 1), "selector": selector.status()}

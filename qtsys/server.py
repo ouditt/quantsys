@@ -308,6 +308,66 @@ async def _news_narrative(sym: str, items: list[dict]) -> str:
     return txt
 
 
+@app.get("/api/industry")
+async def industry(sym: str):
+    """Sector of `sym` + its constituents, each with LIVE % change (computed in
+    Python from Alpaca snapshots) and market-cap weight; plus the sector's
+    market-cap-weighted daily change."""
+    return await asyncio.to_thread(_build_industry, state["broker"], sym)
+
+
+def _build_industry(broker, sym) -> dict:
+    from . import intel, sectors
+    import concurrent.futures
+    cls = _clsname(sym) or "Equity"
+    f = intel.fundamentals(sym, cls)
+    sector = (f.get("metrics") or {}).get("sector")
+    members = sectors.constituents(sector)
+    etf = sectors.SECTOR_ETF.get(sector or "")
+    if not members:
+        return {"sector": sector or "—", "constituents": [],
+                "total_change_pct": None, "etf": etf,
+                "note": "sector constituents are available for equities only"}
+    if sym not in members and cls == "Equity":
+        members = [sym] + members
+    # live % change from one batched snapshot (latest trade vs previous close)
+    changes = {}
+    try:
+        from alpaca.data.requests import StockSnapshotRequest
+        snaps = broker.d.get_stock_snapshot(StockSnapshotRequest(symbol_or_symbols=members))
+        for m, sn in (snaps or {}).items():
+            lt = getattr(sn, "latest_trade", None)
+            db = getattr(sn, "daily_bar", None)
+            pdb = getattr(sn, "previous_daily_bar", None)
+            last = float(lt.price) if lt else (float(db.close) if db else None)
+            prev = float(pdb.close) if pdb else (float(db.open) if db else None)
+            if last and prev:
+                changes[m] = (last, prev, last / prev - 1.0)
+    except Exception:
+        pass
+    # market caps, fetched concurrently (cached in intel after first hit)
+    def _mc(m):
+        try:
+            return m, (intel.fundamentals(m, "Equity").get("metrics") or {}).get("market_cap") or 0
+        except Exception:
+            return m, 0
+    mcaps = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=12) as ex:
+        for m, mc in ex.map(_mc, members):
+            mcaps[m] = float(mc or 0)
+    total_mcap = sum(mcaps.values()) or 1.0
+    rows = []
+    for m in members:
+        last, prev, chg = changes.get(m, (None, None, None))
+        rows.append({"symbol": m, "last": last, "change_pct": chg,
+                     "mcap": mcaps.get(m, 0.0),
+                     "weight": mcaps.get(m, 0.0) / total_mcap})
+    rows.sort(key=lambda r: r["weight"], reverse=True)
+    total = sum(r["weight"] * (r["change_pct"] or 0.0) for r in rows)
+    return {"sector": sector, "etf": etf, "constituents": rows,
+            "total_change_pct": total, "asof": time.time()}
+
+
 @app.get("/api/fundamentals")
 async def fundamentals(sym: str):
     """Normalised fundamentals for the instrument (equity ratios / crypto
@@ -508,15 +568,16 @@ def strategies():
 
 
 @app.post("/api/universe/scan")
-async def universe_scan(cap: int = 3000):
-    """Kick off a full-universe morning scan in the background (liquid + your
-    watchlist). Non-blocking; poll /api/universe/status."""
+async def universe_scan(cap: int = 3000, tf: str = "1Day"):
+    """Kick off a full-universe morning scan in the background at timeframe `tf`
+    (1Day|1Hour|15Min|5Min). Non-blocking; poll /api/universe/status."""
     if state.get("uscan", {}).get("running"):
         return {"running": True, "note": "a scan is already in progress"}
+    if tf not in ("1Day", "1Hour", "15Min", "5Min"):
+        raise HTTPException(400, "tf must be 1Day | 1Hour | 15Min | 5Min")
     broker = state["broker"]
     if not hasattr(broker, "history"):
         raise HTTPException(400, "full-universe scan needs an Alpaca venue")
-    # watchlist = resolved/mapped tradable symbols the user has pulled in
     vmap = state.get("vmap") or {}
     watch = [v for v in vmap.values()]
     state["uscan"] = {"running": True, "progress": "starting…", "started": time.time()}
@@ -524,8 +585,8 @@ async def universe_scan(cap: int = 3000):
     def prog(m):
         state["uscan"]["progress"] = m
 
-    asyncio.create_task(_run_universe_scan(broker, watch, cap, prog))
-    return {"running": True, "cap": cap, "watchlist": len(watch)}
+    asyncio.create_task(_run_universe_scan(broker, watch, cap, prog, tf))
+    return {"running": True, "cap": cap, "tf": tf, "watchlist": len(watch)}
 
 
 async def _daily_scan_loop():
@@ -558,10 +619,10 @@ async def _daily_scan_loop():
         await asyncio.sleep(3600)                 # re-check hourly
 
 
-async def _run_universe_scan(broker, watch, cap, prog):
+async def _run_universe_scan(broker, watch, cap, prog, tf="1Day"):
     try:
         from . import universe, selector
-        res = await asyncio.to_thread(universe.run_scan, broker, watch, cap, 2e6, prog)
+        res = await asyncio.to_thread(universe.run_scan, broker, watch, cap, 2e6, prog, tf)
         await asyncio.to_thread(selector.train)      # retrain after every scan
         state["uscan"] = {"running": False, "progress": "done",
                           "result": res, "finished": time.time()}

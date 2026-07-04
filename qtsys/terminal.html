@@ -349,10 +349,11 @@ const S={
  halted:false, peak:0,
  agents:{master:true,list:[]}, alog:[],
  news:[], assetNews:{}, assetNarr:{}, newsEngine:"", fund:{}, ticket:{side:"buy",type:"market"},
+ industry:null, industryFor:null,
  strategies:{asof:null,rows:[]}, stratOpen:null,
  audit:{results:[],universe:[],strategies:[]}, auditStrat:"", auditAsset:"", auditAgent:"",
  uni:{running:false,progress:"",last:null,selector:null}, uniResults:[], uniInstruments:[],
- uniSort:{col:"n_fresh_signals",dir:-1}, uniOnlySetups:false,
+ uniSort:{col:"n_fresh_signals",dir:-1}, uniOnlySetups:false, uniTf:"1Day",
  reports:[], reportOpen:null, reportText:"", journalText:"",
 };
 S._nloading=new Set();S._floading=new Set();
@@ -1004,8 +1005,65 @@ function renderFund(s){
   if(f===undefined)return `<div class="pb mut">loading fundamentals…</div>`;
   if(!f||!f.rows||!f.rows.length)return `<div class="pb mut">No fundamentals for ${s}.</div>`;
   return `<div class="pb"><div class="mut" style="margin-bottom:8px;font-size:11px">${esc(f.brief||"")}</div>
-    <div class="grid3">${f.rows.map(([k,v])=>`<div class="stat"><div class="k">${esc(k)}</div>
-      <div class="v num" style="font-size:13px">${esc(String(v))}</div></div>`).join("")}</div></div>`;
+    <div class="grid3">${f.rows.map(([k,v])=>{
+      const link=(k==="Sector"||k==="Industry")&&v&&v!=="—";
+      const val=link?`<a data-industry="${esc(s)}" style="cursor:pointer;color:var(--amber);text-decoration:underline">${esc(String(v))} ↗</a>`:esc(String(v));
+      return `<div class="stat"><div class="k">${esc(k)}</div>
+      <div class="v num" style="font-size:13px">${val}</div></div>`}).join("")}</div></div>`;
+}
+async function loadIndustry(s){
+  S.industryFor=s;S.industry=null;nav("industry");
+  try{S.industry=await j("/api/industry?sym="+encodeURIComponent(s))}
+  catch(e){S.industry={error:e.detail||"failed to load sector"}}
+  render();
+}
+const PIE=["#58a6ff","#27d17f","#ffb200","#c792ea","#ff8c3c","#ff6b6b","#39d1a0",
+  "#7aa2ff","#e0af68","#bb9af7","#f7768e","#2ac3de","#9ece6a","#e0e0e0"];
+function vIndustry(){
+  const d=S.industry, base=S.industryFor;
+  const back=`<button id="backbtn" data-sym="${esc(base||"")}">← BACK to ${esc(base||"")}</button>`;
+  if(!d)return `${back}<div class="panel"><div class="pb mut">loading sector…</div></div>`;
+  if(d.error||!d.constituents||!d.constituents.length)
+    return `${back}<div class="panel"><div class="ph">Sector</div><div class="pb mut">${esc(d.error||d.note||"no constituents for this sector")}</div></div>`;
+  const tot=d.total_change_pct||0;
+  const rows=d.constituents.map((r,i)=>{const ch=r.change_pct;
+    return `<tr class="rowlink" data-resolve="${esc(r.symbol)}">
+    <td><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:${PIE[i%PIE.length]}"></span></td>
+    <td><span class="sym">${esc(r.symbol)}</span></td>
+    <td class="num">${(r.weight*100).toFixed(1)}%</td>
+    <td class="num ${ch==null?"mut":ch>=0?"up":"dn"}">${ch==null?"—":(ch>=0?"+":"")+(ch*100).toFixed(2)+"%"}</td>
+    <td class="num mut">${r.mcap?"$"+(r.mcap/1e9).toFixed(0)+"B":"—"}</td></tr>`}).join("");
+  return `${back}
+  <div id="sec-head"><h1>${esc(d.sector||"Sector")}</h1>
+    <span class="chip">market-cap weighted</span>${d.etf?`<span class="chip" data-resolve="${esc(d.etf)}" style="cursor:pointer">ETF ${esc(d.etf)} ↗</span>`:""}</div>
+  <div style="display:flex;align-items:baseline;gap:12px;margin:6px 0 12px">
+    <span class="mut">Sector daily change</span>
+    <span class="bigpx num ${tot>=0?"up":"dn"}">${(tot>=0?"+":"")+(tot*100).toFixed(2)}%</span></div>
+  <div class="cols"><div>
+    <div class="panel"><div class="ph">Constituents by market-cap share</div>
+      <div class="pb" style="display:flex;justify-content:center"><canvas id="pie" width="300" height="300" style="max-width:320px"></canvas></div>
+      <div class="note">Slice size = share of sector market cap · slice colour = today's move (green up / red down). Live % change computed from Alpaca snapshots.</div></div>
+  </div><div>
+    <div class="panel"><div class="ph">Constituents <span class="right mut">${d.constituents.length}</span></div>
+    <div style="overflow-x:auto;max-height:52vh"><table><thead><tr><th></th><th>Symbol</th><th>Weight</th><th>Today</th><th>Mkt cap</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>
+    <div class="note">Click a constituent to open its chart. Weighted total above = Σ(weight × daily change).</div></div>
+  </div></div>`;
+}
+function drawPie(){
+  const cv=$("#pie");if(!cv||!S.industry||!S.industry.constituents)return;
+  const dpr=devicePixelRatio||1,w=cv.clientWidth||300,h=300;
+  cv.width=w*dpr;cv.height=h*dpr;const x=cv.getContext("2d");x.scale(dpr,dpr);
+  const cx=w/2,cy=h/2,r=Math.min(cx,cy)-6;let a=-Math.PI/2;
+  S.industry.constituents.forEach((c,i)=>{const frac=c.weight||0;if(frac<=0)return;
+    const a2=a+frac*2*Math.PI;const ch=c.change_pct;
+    x.beginPath();x.moveTo(cx,cy);x.arc(cx,cy,r,a,a2);x.closePath();
+    x.fillStyle=ch==null?"#3a4152":ch>=0?"rgba(39,209,127,.85)":"rgba(255,80,99,.85)";
+    x.fill();x.strokeStyle="#0b0f15";x.lineWidth=1.2;x.stroke();
+    if(frac>0.05){const mid=(a+a2)/2,lx=cx+Math.cos(mid)*r*0.62,ly=cy+Math.sin(mid)*r*0.62;
+      x.fillStyle="#0b0f15";x.font="bold 10px "+getComputedStyle(document.body).fontFamily;
+      x.textAlign="center";x.fillText(c.symbol,lx,ly)}
+    a=a2});
 }
 async function loadFund(s){
   if(S.mode!=="live"||S.fund[s]!==undefined||S._floading.has(s))return;
@@ -1225,8 +1283,11 @@ function vUniverse(){
   const fp=x=>x==null?"—":(x*100).toFixed(1)+"%";
   return `
   <div class="panel"><div class="ph">Full-universe morning scan
-    <span class="right">${u.running?`<span class="pill warn" style="color:var(--warn)">SCANNING…</span>`:
-      `<button class="btn" id="uRun">▶ Run full scan</button>`}</span></div>
+    <span class="right" style="display:inline-flex;gap:8px;align-items:center">
+      <span class="seg" id="uTfSeg">${[["1Day","D"],["1Hour","1H"],["15Min","15m"],["5Min","5m"]].map(([v,l])=>
+        `<button data-utf="${v}" class="${S.uniTf===v?"on":""}">${l}</button>`).join("")}</span>
+      ${u.running?`<span class="pill warn" style="color:var(--warn)">SCANNING…</span>`:
+      `<button class="btn" id="uRun">▶ Run scan</button>`}</span></div>
     <div class="pb" style="font-size:11.5px;line-height:1.7">
       ${u.running?`<b>Working:</b> ${esc(u.progress||"…")}`:
         last?`Last scan: <b>${last.scanned}</b> of <b>${last.universe}</b> liquid instruments · <b>${last.n_setups}</b> fresh setups · ${last.took}s`:
@@ -1281,7 +1342,8 @@ function uniTable(){
     <div class="note">Every liquid Alpaca instrument (+ your watchlist) the scan covered — <b>click a column header to rank</b> by liquidity, volatility, momentum, or fresh-setup count. <b>Click a row to open the instrument</b> (it's resolved live). The ML selector learns which of these are worth scanning; after warm-up it narrows the set to make this ~10× faster.</div></div>`;
 }
 async function runUniverseScan(){
-  try{await j("/api/universe/scan?cap=3000",{method:"POST"});toast("full-universe scan started…");}
+  try{await j("/api/universe/scan?cap=3000&tf="+encodeURIComponent(S.uniTf),{method:"POST"});
+    toast(S.uniTf+" universe scan started…");}
   catch(e){toast(e.detail||"scan failed to start","err");}
   pollUniverse();
 }
@@ -1376,7 +1438,7 @@ function fxOpen(){const d=new Date(),u=d.getUTCDay(),h=d.getUTCHours();
 
 /* ============================================================ render */
 const VIEWS={markets:vMarkets,security:vSecurity,portfolio:vPortfolio,
-  risk:vRisk,agents:vAgents,strats:vStrats,universe:vUniverse,audit:vAudit,journal:vJournals};
+  risk:vRisk,agents:vAgents,strats:vStrats,universe:vUniverse,audit:vAudit,journal:vJournals,industry:vIndustry};
 function render(scroll){
   // header
   $("#modechip").className="chip "+(S.mode==="live"?"live":"demo");
@@ -1399,6 +1461,7 @@ function render(scroll){
   // post-render wiring
   $$("canvas.spark").forEach(cv=>{const s=cv.dataset.spark,q=S.quotes[s];
     drawSpark(cv,q.spark,q.spark.at(-1)>=q.spark[0])});
+  if(S.page==="industry")drawPie();
   if(S.page==="security"){drawChart(S.sym);
     loadNews(S.sym);loadFund(S.sym);
     if(S.gran!=="1D"&&!(S.ibars[S.sym]&&S.ibars[S.sym].length))setGran(S.gran);
@@ -1427,6 +1490,7 @@ function render(scroll){
   }
   if(S.page==="universe"){
     const ur=$("#uRun");if(ur)ur.onclick=runUniverseScan;
+    $$("#uTfSeg button").forEach(b=>b.onclick=()=>{S.uniTf=b.dataset.utf;render()});
     $$(".sorth").forEach(th=>th.onclick=()=>{const c=th.dataset.sort;
       if(S.uniSort.col===c)S.uniSort.dir*=-1;else S.uniSort={col:c,dir:c==="asset"?1:-1};render()});
     const uo=$("#uOnly");if(uo)uo.onclick=()=>{S.uniOnlySetups=!S.uniOnlySetups;render()};
@@ -1522,6 +1586,8 @@ document.addEventListener("click",e=>{
   const symEl=e.target.closest("[data-sym]");
   if(symEl){e.stopPropagation();S.tf=380;S.ticket={side:"buy",type:"market"};
     nav("security",symEl.dataset.sym);return}
+  const ind=e.target.closest("[data-industry]");
+  if(ind){loadIndustry(ind.dataset.industry);return}
   const ro=e.target.closest("[data-resolve]");
   if(ro){resolveSym(ro.dataset.resolve);return}
   const strat=e.target.closest("[data-strat]");
