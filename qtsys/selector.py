@@ -31,7 +31,7 @@ import numpy as np
 HERE = os.path.dirname(__file__)
 DB = os.path.join(HERE, "universe_selector.db")
 
-WARMUP_DAYS = 30            # distinct scan-days before we may leave warmup
+WARMUP_DAYS = 180          # distinct scan-days before we may leave warmup
 FWD_K = 10                 # bars ahead to score the setup
 FEE_FLOOR = 0.001          # a move must clear this to count as "worthwhile"
 GATE_RECALL = 0.90         # top-K must capture this share of good setups
