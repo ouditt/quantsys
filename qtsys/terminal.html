@@ -362,6 +362,8 @@ const S={
  uni:{running:false,progress:"",last:null,selector:null}, uniResults:[], uniInstruments:[],
  uniSort:{col:"n_fresh_signals",dir:-1}, uniOnlySetups:false, uniTf:"1Day",
  reports:[], reportOpen:null, reportText:"", journalText:"",
+ dataFields:null, dataSyms:"AAPL, MSFT, NVDA, BTC/USD",
+ dataSel:["last","chg_pct","rsi14","mom_252","pe","sector"], dataRows:null, dataBusy:false,
 };
 S._nloading=new Set();S._floading=new Set();
 try{Object.assign(S.p,JSON.parse(localStorage.getItem("qtsys_params")||"{}"))}catch(e){}
@@ -887,7 +889,7 @@ async function toggleAgent(name,enabled){
 }
 
 /* ============================================================ views */
-const TABS=[["markets","MKT"],["portfolio","PORT"],["risk","RISK"],["calendar","CAL"],["screen","SCREEN"],["alerts","ALERTS"],["agents","AGENTS"],["strats","STRAT"],["universe","UNIVERSE"],["audit","AUDIT"],["journal","JOURNAL"]];
+const TABS=[["markets","MKT"],["portfolio","PORT"],["risk","RISK"],["calendar","CAL"],["screen","SCREEN"],["alerts","ALERTS"],["agents","AGENTS"],["strats","STRAT"],["universe","UNIVERSE"],["data","DATA"],["audit","AUDIT"],["journal","JOURNAL"]];
 function nav(page,sym){S.page=page;S.sym=sym??S.sym;
   location.hash=page==="security"?`/sec/${S.sym}`:`/${page}`;
   render();$("#view").scrollTop=0}
@@ -1366,6 +1368,80 @@ async function addAlert(){
   catch(e){toast(e.detail||"failed to add alert","err")}
 }
 async function pollAlerts(){try{S.alerts=await j("/api/alerts");if(S.page==="alerts")render()}catch(e){}}
+/* ============================================================ DATA (BQL-style data-out) */
+const DATA_CATS=[["price","Price"],["technical","Technical"],["fundamental","Fundamental"],["news","News"]];
+function dataQS(){
+  const syms=(S.dataSyms||"").split(",").map(s=>s.trim().toUpperCase()).filter(Boolean);
+  const flds=S.dataSel.filter(f=>(S.dataFields||[]).some(x=>x.name===f));
+  return {syms,flds,q:`symbols=${encodeURIComponent(syms.join(","))}&fields=${flds.join(",")}`};
+}
+function dataUrl(fmt){const {q}=dataQS();return `${location.origin}/api/data?${q}${fmt?"&format="+fmt:""}`;}
+async function runData(){
+  const {syms,flds}=dataQS();
+  if(!syms.length||!flds.length){toast("pick ≥1 symbol and ≥1 field","err");return}
+  S.dataBusy=true;render();
+  try{const d=await j("/api/data?"+dataQS().q);S.dataRows={fields:d.fields,rows:d.rows};}
+  catch(e){toast(e.detail||"data fetch failed","err");S.dataRows=null}
+  S.dataBusy=false;render();
+}
+function dataToggle(f){const i=S.dataSel.indexOf(f);
+  if(i<0)S.dataSel.push(f);else S.dataSel.splice(i,1);render();}
+function copyText(t,msg){navigator.clipboard.writeText(t).then(()=>toast(msg||"copied","ok"),()=>toast("copy failed","err"));}
+function downloadCsv(){
+  const url=dataUrl("csv");fetch(url).then(r=>r.text()).then(txt=>{
+    const b=new Blob([txt],{type:"text/csv"}),a=document.createElement("a");
+    a.href=URL.createObjectURL(b);a.download="qtsys_data.csv";a.click();URL.revokeObjectURL(a.href);
+    toast("downloaded qtsys_data.csv","ok")});
+}
+function fmtCell(v){
+  if(v==null)return `<span class="mut">—</span>`;
+  if(typeof v==="number")return `<span class="num">${Number.isInteger(v)?v:v.toFixed(2)}</span>`;
+  return esc(String(v));
+}
+function vData(){
+  if(!S.dataFields)return `<div class="panel"><div class="pb mut">loading field catalog…</div></div>`;
+  const chips=DATA_CATS.map(([cat,lbl])=>{
+    const fs=S.dataFields.filter(f=>f.category===cat);if(!fs.length)return"";
+    return `<div class="dgrp"><div class="mut" style="font-size:10.5px;margin-bottom:4px">${lbl}</div>
+      <div style="display:flex;gap:5px;flex-wrap:wrap">${fs.map(f=>{
+        const on=S.dataSel.includes(f.name);
+        return `<button class="btn tiny ${on?"":"ghost"}" data-fld="${f.name}" title="${esc(f.desc)}">${f.name}</button>`}).join("")}</div></div>`;
+  }).join("");
+  const {syms,flds}=dataQS();
+  let table=`<div class="pb mut">select symbols + fields, then Run to build the table</div>`;
+  if(S.dataBusy)table=`<div class="pb mut">pulling ${syms.length} symbols × ${flds.length} fields…</div>`;
+  else if(S.dataRows){
+    const {fields,rows}=S.dataRows;
+    table=`<div style="max-height:52vh;overflow:auto"><table><thead><tr><th>Symbol</th>
+      ${fields.map(f=>`<th>${f}</th>`).join("")}</tr></thead><tbody>
+      ${rows.map(r=>`<tr class="rowlink" data-resolve="${esc(r.symbol)}"><td><span class="sym">${esc(r.symbol)}</span></td>
+        ${fields.map(f=>`<td>${fmtCell(r[f])}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
+  }
+  const url=dataUrl("csv");
+  return `
+  <div class="panel"><div class="ph">Data-out <span class="right mut">BQL-style · pull into Excel / pandas</span></div>
+    <div class="pb">
+      <div class="mut" style="font-size:10.5px;margin-bottom:4px">Symbols (comma-separated · equities, crypto pairs, options OCC)</div>
+      <textarea id="dSyms" class="asel" style="width:100%;height:44px;text-transform:uppercase;resize:vertical">${esc(S.dataSyms)}</textarea>
+      <div style="margin-top:10px;display:flex;gap:16px;flex-wrap:wrap">${chips}</div>
+      <div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="btn" id="dRun"${S.dataBusy?" disabled":""}>${S.dataBusy?"…":"Run"}</button>
+        <span class="mut">${S.dataSel.length} fields selected</span>
+        <span class="right"></span>
+        <button class="btn tiny ghost" id="dCopyCsv">Copy CSV</button>
+        <button class="btn tiny ghost" id="dDl">Download .csv</button>
+        <button class="btn tiny ghost" id="dCopyUrl">Copy URL</button>
+      </div>
+    </div></div>
+  <div class="panel"><div class="ph">Result</div>${table}</div>
+  <div class="panel"><div class="ph">Use it anywhere</div><div class="pb">
+    <div class="mut" style="font-size:10.5px;margin-bottom:3px">Live CSV endpoint (updates every request):</div>
+    <code style="display:block;word-break:break-all;font-size:11px;background:#0b0f14;padding:8px;border-radius:5px">${esc(url)}</code>
+    <div class="mut" style="font-size:10.5px;margin:8px 0 3px">Python:</div>
+    <code style="display:block;font-size:11px;background:#0b0f14;padding:8px;border-radius:5px">import pandas as pd; df = pd.read_csv("${esc(url)}")</code>
+    <div class="mut" style="font-size:10.5px;margin:8px 0 3px">Excel: Data → From Web → paste the URL above.</div>
+  </div></div>`;
+}
 const SCREEN_PRESETS={all:{},value:{peMax:20},growth:{revMin:20},
   quality:{marginMin:20},dividend:{divMin:1.5}};
 function screenRows(){
@@ -1610,7 +1686,7 @@ function fxOpen(){const d=new Date(),u=d.getUTCDay(),h=d.getUTCHours();
 
 /* ============================================================ render */
 const VIEWS={markets:vMarkets,security:vSecurity,portfolio:vPortfolio,
-  risk:vRisk,agents:vAgents,strats:vStrats,universe:vUniverse,audit:vAudit,journal:vJournals,industry:vIndustry,options:vOptions,calendar:vCalendar,screen:vScreen,alerts:vAlerts};
+  risk:vRisk,agents:vAgents,strats:vStrats,universe:vUniverse,audit:vAudit,journal:vJournals,industry:vIndustry,options:vOptions,calendar:vCalendar,screen:vScreen,alerts:vAlerts,data:vData};
 function render(scroll){
   // header
   $("#modechip").className="chip "+(S.mode==="live"?"live":"demo");
@@ -1689,6 +1765,15 @@ function render(scroll){
     const ut=$("#uTrain");if(ut)ut.onclick=async()=>{toast("retraining selector…");
       try{S.uni.selector=await j("/api/universe/train",{method:"POST"});render();
         toast("selector: "+(S.uni.selector.phase||"?"),"ok")}catch(e){toast("train failed","err")}};
+  }
+  if(S.page==="data"){
+    if(!S.dataFields){j("/api/data/fields").then(d=>{S.dataFields=d.fields||[];if(S.page==="data")render()}).catch(()=>{});}
+    const ds=$("#dSyms");if(ds)ds.oninput=()=>S.dataSyms=ds.value;
+    $$("[data-fld]").forEach(b=>b.onclick=()=>dataToggle(b.dataset.fld));
+    const dr=$("#dRun");if(dr)dr.onclick=runData;
+    const dc=$("#dCopyCsv");if(dc)dc.onclick=()=>fetch(dataUrl("csv")).then(r=>r.text()).then(t=>copyText(t,"CSV copied"));
+    const dd=$("#dDl");if(dd)dd.onclick=downloadCsv;
+    const du=$("#dCopyUrl");if(du)du.onclick=()=>copyText(dataUrl("csv"),"URL copied");
   }
   const master=$("#master");if(master)master.onclick=()=>toggleAgent(null,!S.agents.master);
   $$("[data-agent]").forEach(b=>b.onclick=()=>{

@@ -424,6 +424,141 @@ def alerts_delete(aid: str):
     return {"ok": True}
 
 
+# BQL-style field catalog: name -> (category, description). Pull any of these for
+# any symbol via /api/data (JSON or CSV) — the "data-out" surface for Excel/Python.
+_FIELDS = {
+    "last": ("price", "last trade price"), "chg_pct": ("price", "daily % change"),
+    "prev_close": ("price", "previous close"), "open": ("price", "last bar open"),
+    "high": ("price", "last bar high"), "low": ("price", "last bar low"),
+    "rsi14": ("technical", "14-period RSI (daily)"),
+    "sma20": ("technical", "20-day simple MA"), "sma100": ("technical", "100-day simple MA"),
+    "atr14": ("technical", "14-day ATR"), "mom_63": ("technical", "3-month momentum %"),
+    "mom_252": ("technical", "12-month momentum %"),
+    "vol_ann": ("technical", "annualized realized vol %"),
+    "pe": ("fundamental", "trailing P/E"), "forward_pe": ("fundamental", "forward P/E"),
+    "peg": ("fundamental", "PEG"), "eps": ("fundamental", "trailing EPS"),
+    "rev_growth": ("fundamental", "revenue growth %"),
+    "earnings_growth": ("fundamental", "earnings growth %"),
+    "margin": ("fundamental", "profit margin %"), "debt_equity": ("fundamental", "debt/equity"),
+    "beta": ("fundamental", "beta"), "div_yield": ("fundamental", "dividend yield %"),
+    "target": ("fundamental", "mean analyst target"),
+    "analyst": ("fundamental", "analyst recommendation"),
+    "mcap": ("fundamental", "market cap"), "sector": ("fundamental", "GICS sector"),
+    "industry": ("fundamental", "industry"),
+    "news_count": ("news", "# recent headlines"),
+    "sentiment": ("news", "mean net sentiment score"),
+}
+_FUND_KEY = {"pe": "pe", "forward_pe": "forward_pe", "peg": "peg", "eps": "eps",
+             "rev_growth": "rev_growth_pct", "earnings_growth": "earnings_growth_pct",
+             "margin": "profit_margin_pct", "debt_equity": "debt_to_equity",
+             "beta": "beta", "div_yield": "div_yield_pct", "target": "target_mean",
+             "analyst": "analyst", "mcap": "market_cap", "sector": "sector",
+             "industry": "industry"}
+
+
+def _mean(xs):
+    xs = [x for x in xs if x is not None]
+    return sum(xs) / len(xs) if xs else None
+
+
+def _data_row(sym, fields) -> dict:
+    if sym not in state["hist"]:
+        try:
+            resolve(sym)
+        except Exception:
+            pass
+    bars = state["hist"].get(sym, [])
+    closes = [b["c"] for b in bars]
+    q = state["daemon"].context["quotes"].get(sym, {})
+    cats = {_FIELDS.get(f, ("", ""))[0] for f in fields}
+    m = {}
+    if "fundamental" in cats:
+        from . import intel
+        try:
+            m = intel.fundamentals(sym, _clsname(sym) or "Equity").get("metrics", {}) or {}
+        except Exception:
+            m = {}
+    news = []
+    if "news" in cats:
+        from . import intel
+        try:
+            news = intel.news(sym, _clsname(sym) or "Equity")
+        except Exception:
+            news = []
+    out = {}
+    for f in fields:
+        out[f] = _field_value(f, sym, q, bars, closes, m, news)
+    return out
+
+
+def _field_value(f, sym, q, bars, closes, m, news):
+    import numpy as np
+    n = len(closes)
+    if f == "last":
+        return q.get("last") or (closes[-1] if closes else None)
+    if f == "chg_pct":
+        return q.get("chg_pct")
+    if f == "prev_close":
+        return closes[-2] if n >= 2 else None
+    if f in ("open", "high", "low") and bars:
+        return bars[-1].get({"open": "o", "high": "h", "low": "l"}[f])
+    if f == "rsi14":
+        return _rsi(closes)
+    if f == "sma20":
+        return float(np.mean(closes[-20:])) if n >= 20 else None
+    if f == "sma100":
+        return float(np.mean(closes[-100:])) if n >= 100 else None
+    if f == "atr14" and len(bars) > 15:
+        tr = [max(bars[i]["h"] - bars[i]["l"], abs(bars[i]["h"] - bars[i - 1]["c"]),
+                  abs(bars[i]["l"] - bars[i - 1]["c"])) for i in range(len(bars) - 14, len(bars))]
+        return float(np.mean(tr))
+    if f == "mom_63":
+        return round(closes[-1] / closes[-63] - 1, 4) * 100 if n > 63 else None
+    if f == "mom_252":
+        return round(closes[-1] / closes[-252] - 1, 4) * 100 if n > 252 else None
+    if f == "vol_ann" and n > 21:
+        r = np.diff(closes[-21:]) / np.array(closes[-21:-1])
+        return round(float(np.std(r) * np.sqrt(252)) * 100, 2)
+    if f in _FUND_KEY:
+        return m.get(_FUND_KEY[f])
+    if f == "news_count":
+        return len(news)
+    if f == "sentiment":
+        return round(_mean([x.get("sent_score") for x in news]) or 0, 2) if news else None
+    return None
+
+
+@app.get("/api/data/fields")
+def data_fields():
+    """The BQL-style field catalog you can request from /api/data."""
+    return {"fields": [{"name": k, "category": v[0], "desc": v[1]}
+                       for k, v in _FIELDS.items()]}
+
+
+@app.get("/api/data")
+async def data_api(symbols: str, fields: str = "last,chg_pct", format: str = "json"):
+    """Tabular data-out (BQL-style): any fields for any symbols, JSON or CSV.
+    e.g. /api/data?symbols=AAPL,MSFT&fields=last,pe,rsi14,mom_252&format=csv
+    Pull straight into pandas: pd.read_csv(URL)  or Excel Power Query."""
+    syms = [s.strip().upper() for s in symbols.split(",") if s.strip()][:50]
+    flds = [f.strip() for f in fields.split(",") if f.strip() and f.strip() in _FIELDS]
+    if not syms or not flds:
+        raise HTTPException(400, "need symbols and valid fields (see /api/data/fields)")
+    rows = await asyncio.to_thread(
+        lambda: [dict(symbol=s, **_data_row(s, flds)) for s in syms])
+    if format == "csv":
+        import csv
+        import io
+        from fastapi.responses import PlainTextResponse
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["symbol"] + flds)
+        for r in rows:
+            w.writerow([r.get("symbol")] + [r.get(f) for f in flds])
+        return PlainTextResponse(buf.getvalue(), media_type="text/csv")
+    return {"fields": flds, "rows": rows}
+
+
 @app.get("/api/screen")
 async def screen():
     """Fundamental screener universe: sector constituents + your book +
