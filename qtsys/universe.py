@@ -179,8 +179,9 @@ def _scan_one(sym, df, specs, fresh_bars):
                                "hist_exp": None})
     # per-instrument features for the ML selector (point-in-time as of last bar)
     ret = c.pct_change()
+    net = sum(1 if s["side"] == "LONG" else -1 for s in setups)
     feats = {
-        "asset": sym,
+        "asset": sym, "last": float(c.iloc[-1]),
         "dollar_vol": float((c * df["volume"]).tail(20).mean()) if "volume" in df else 0.0,
         "rvol_20": float(ret.tail(20).std() * np.sqrt(252)) if n > 21 else 0.0,
         "rvol_ratio": float((ret.tail(20).std() / (ret.tail(100).std() + 1e-9)))
@@ -188,9 +189,10 @@ def _scan_one(sym, df, specs, fresh_bars):
         "mom_63": float(c.iloc[-1] / c.iloc[-63] - 1) if n > 63 else 0.0,
         "mom_252": float(c.iloc[-1] / c.iloc[-252] - 1) if n > 252 else 0.0,
         "dist_52w_high": float(c.iloc[-1] / c.tail(252).max() - 1) if n > 20 else 0.0,
-        "n_fresh_signals": sum(1 for s in setups),
-        "n_signals_total": n_signals,
-        "bars": n,
+        "n_fresh_signals": len(setups),
+        "n_signals_total": n_signals, "bars": n,
+        "fresh": sorted({s["strategy"] for s in setups}),
+        "net_side": "LONG" if net > 0 else "SHORT" if net < 0 else "—",
     }
     return {"setups": setups, "features": feats}
 
@@ -228,7 +230,7 @@ def run_scan(broker, watchlist=(), cap=3000, min_dollar_vol=2e6,
     prog("done")
     return {"asof": time.time(), "phase": st["phase"], "universe": len(liq),
             "scanned": len(bars), "n_setups": len(setups),
-            "setups": setups[:200], "labelled_now": labelled,
+            "setups": setups[:200], "instruments": feats, "labelled_now": labelled,
             "took": round(time.time() - t0, 1), "selector": selector.status()}
 
 

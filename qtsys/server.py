@@ -551,8 +551,8 @@ def universe_status():
 
 @app.get("/api/universe/results")
 def universe_results():
-    u = state.get("uscan", {})
-    return {"setups": (u.get("result") or {}).get("setups", [])}
+    r = state.get("uscan", {}).get("result") or {}
+    return {"setups": r.get("setups", []), "instruments": r.get("instruments", [])}
 
 
 @app.post("/api/universe/train")

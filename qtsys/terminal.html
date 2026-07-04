@@ -351,7 +351,8 @@ const S={
  news:[], assetNews:{}, assetNarr:{}, newsEngine:"", fund:{}, ticket:{side:"buy",type:"market"},
  strategies:{asof:null,rows:[]}, stratOpen:null,
  audit:{results:[],universe:[],strategies:[]}, auditStrat:"", auditAsset:"", auditAgent:"",
- uni:{running:false,progress:"",last:null,selector:null}, uniResults:[],
+ uni:{running:false,progress:"",last:null,selector:null}, uniResults:[], uniInstruments:[],
+ uniSort:{col:"n_fresh_signals",dir:-1}, uniOnlySetups:false,
  reports:[], reportOpen:null, reportText:"", journalText:"",
 };
 S._nloading=new Set();S._floading=new Set();
@@ -528,7 +529,7 @@ async function liveInit(){
   catch(e){applyPosture(CUR_POSTURE,false)}
   try{S.strategies=await j("/api/strategies")}catch(e){}
   try{S.audit=await j("/api/audit")}catch(e){}
-  try{S.uni=await j("/api/universe/status");const r=await j("/api/universe/results");S.uniResults=r.setups||[]}catch(e){}
+  try{S.uni=await j("/api/universe/status");const r=await j("/api/universe/results");S.uniResults=r.setups||[];S.uniInstruments=r.instruments||[]}catch(e){}
   try{S.reports=(await j("/api/reports")).reports||[]}catch(e){}
   try{S.journalText=(await j("/api/journal")).text||""}catch(e){}
 }
@@ -1222,11 +1223,6 @@ function vUniverse(){
   const pc=phase==="active"?"up":phase==="shadow"?"warn":"";
   const imp=sel.importances||{};
   const fp=x=>x==null?"—":(x*100).toFixed(1)+"%";
-  const rows=(S.uniResults||[]).slice(0,120).map(s=>`<tr class="rowlink" data-sym="${esc(s.asset)}">
-    <td><span class="sym">${esc(s.asset)}</span></td><td><span class="sym">${esc(s.strategy)}</span></td>
-    <td>${esc(s.family||"")}</td><td class="${s.side==="LONG"?"up":"dn"}">${s.side}</td>
-    <td class="mut">${esc(s.signal_date||"")}</td></tr>`).join("")
-    ||`<tr><td colspan="5" class="mut">No scan yet — hit "Run full scan".</td></tr>`;
   return `
   <div class="panel"><div class="ph">Full-universe morning scan
     <span class="right">${u.running?`<span class="pill warn" style="color:var(--warn)">SCANNING…</span>`:
@@ -1253,10 +1249,36 @@ function vUniverse(){
       <span class="mut" style="font-size:10.5px;margin-left:8px">narrowing activates automatically once recall clears the gate on held-out days</span></div>
     </div></div>
 
-  <div class="panel"><div class="ph">Fresh setups <span class="right mut">${(S.uniResults||[]).length} ranked</span></div>
-    <div style="overflow-x:auto;max-height:50vh"><table><thead><tr><th>Instrument</th><th>Strategy</th><th>Family</th><th>Side</th><th>Signal date</th></tr></thead>
-    <tbody>${rows}</tbody></table></div>
-    <div class="note">Every liquid Alpaca instrument (+ your watchlist) scanned with the single-instrument strategies. Click a row to open the instrument. The ML selector learns which instruments are worth scanning; after warm-up it narrows the set to make this ~10× faster.</div></div>`;
+  ${uniTable()}`;
+}
+function uniTable(){
+  const so=S.uniSort;
+  let inst=(S.uniInstruments||[]).slice();
+  if(S.uniOnlySetups)inst=inst.filter(x=>x.n_fresh_signals>0);
+  inst.sort((a,b)=>{const av=a[so.col],bv=b[so.col];
+    if(typeof av==="string")return so.dir*String(av).localeCompare(String(bv));
+    return so.dir*(((av??-1e18))-((bv??-1e18)))});
+  const cols=[["asset","Instrument","s"],["last","Last","n"],["dollar_vol","$ Vol","v"],
+    ["rvol_20","Ann.Vol","p"],["mom_63","3m mom","p"],["mom_252","12m mom","p"],
+    ["dist_52w_high","vs 52w hi","p"],["n_fresh_signals","Fresh","n"],["net_side","Side","x"]];
+  const fp=x=>x==null?"—":(x*100).toFixed(1)+"%";
+  const fmv=x=>{x=+x||0;for(const [u,d] of [["B",1e9],["M",1e6],["K",1e3]])if(Math.abs(x)>=d)return "$"+(x/d).toFixed(1)+u;return "$"+x.toFixed(0)};
+  const cell=(r,c,t)=>{const v=r[c];
+    if(t==="v")return `<td class="num">${fmv(v)}</td>`;
+    if(t==="p")return `<td class="num ${(v||0)>=0?"up":"dn"}">${fp(v)}</td>`;
+    if(t==="n")return `<td class="num">${v==null?"—":(+v).toLocaleString()}</td>`;
+    if(t==="x")return `<td class="${v==="LONG"?"up":v==="SHORT"?"dn":"mut"}">${v||"—"}</td>`;
+    return `<td><span class="sym">${esc(v)}</span></td>`;};
+  const head=cols.map(([c,l])=>`<th class="sorth" data-sort="${c}" style="cursor:pointer;white-space:nowrap">${l}${so.col===c?(so.dir<0?" ▾":" ▴"):""}</th>`).join("")+"<th>Fresh strategies</th>";
+  const body=inst.length?inst.slice(0,400).map(r=>`<tr class="rowlink" data-resolve="${esc(r.asset)}">
+    ${cols.map(([c,l,t])=>cell(r,c,t)).join("")}
+    <td class="mut" style="font-size:10px">${(r.fresh||[]).slice(0,4).join(", ")||"—"}</td></tr>`).join("")
+    :`<tr><td colspan="10" class="mut">No scan yet — hit "Run full scan".</td></tr>`;
+  return `<div class="panel"><div class="ph">Scanned instruments · rank by any column
+    <span class="right"><button class="btn tiny${S.uniOnlySetups?" on":""}" id="uOnly">${S.uniOnlySetups?"fresh setups ✓":"only fresh setups"}</button>
+    <span class="mut" style="margin-left:8px">${inst.length} shown</span></span></div>
+    <div style="overflow-x:auto;max-height:56vh"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>
+    <div class="note">Every liquid Alpaca instrument (+ your watchlist) the scan covered — <b>click a column header to rank</b> by liquidity, volatility, momentum, or fresh-setup count. <b>Click a row to open the instrument</b> (it's resolved live). The ML selector learns which of these are worth scanning; after warm-up it narrows the set to make this ~10× faster.</div></div>`;
 }
 async function runUniverseScan(){
   try{await j("/api/universe/scan?cap=3000",{method:"POST"});toast("full-universe scan started…");}
@@ -1265,7 +1287,7 @@ async function runUniverseScan(){
 }
 async function pollUniverse(){
   try{const st=await j("/api/universe/status");S.uni=st;
-    if(!st.running){const r=await j("/api/universe/results");S.uniResults=r.setups||[];}
+    if(!st.running){const r=await j("/api/universe/results");S.uniResults=r.setups||[];S.uniInstruments=r.instruments||[];}
     if(S.page==="universe"&&document.activeElement.tagName!=="INPUT")render();
     if(st.running)setTimeout(pollUniverse,2000);
   }catch(e){}
@@ -1405,6 +1427,9 @@ function render(scroll){
   }
   if(S.page==="universe"){
     const ur=$("#uRun");if(ur)ur.onclick=runUniverseScan;
+    $$(".sorth").forEach(th=>th.onclick=()=>{const c=th.dataset.sort;
+      if(S.uniSort.col===c)S.uniSort.dir*=-1;else S.uniSort={col:c,dir:c==="asset"?1:-1};render()});
+    const uo=$("#uOnly");if(uo)uo.onclick=()=>{S.uniOnlySetups=!S.uniOnlySetups;render()};
     const ut=$("#uTrain");if(ut)ut.onclick=async()=>{toast("retraining selector…");
       try{S.uni.selector=await j("/api/universe/train",{method:"POST"});render();
         toast("selector: "+(S.uni.selector.phase||"?"),"ok")}catch(e){toast("train failed","err")}};
@@ -1497,6 +1522,8 @@ document.addEventListener("click",e=>{
   const symEl=e.target.closest("[data-sym]");
   if(symEl){e.stopPropagation();S.tf=380;S.ticket={side:"buy",type:"market"};
     nav("security",symEl.dataset.sym);return}
+  const ro=e.target.closest("[data-resolve]");
+  if(ro){resolveSym(ro.dataset.resolve);return}
   const strat=e.target.closest("[data-strat]");
   if(strat){S.stratOpen=S.stratOpen===strat.dataset.strat?null:strat.dataset.strat;render();return}
   const rep=e.target.closest("[data-report]");
