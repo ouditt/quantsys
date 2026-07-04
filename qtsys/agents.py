@@ -198,6 +198,14 @@ class AgentDaemon:
                             reverse=True)[:3]
             note = ", ".join(f"{s} {v['chg_pct']:+.2f}%" for s, v in movers)
             msg = f"scan: top movers {note}; regimes updated"
+            fund = self.context.get("fundamentals")   # live fundamental read
+            if fund and movers:
+                try:
+                    b = fund(movers[0][0]).get("brief")
+                    if b:
+                        msg += f" | fundamentals — {b}"
+                except Exception:
+                    pass
         elif agent.name == "Risk Officer" and acct:
             msg = (f"gross {acct.get('gross_exposure', 0):,.0f} "
                    f"({acct.get('leverage', 0):.2f}x lev), day P&L "

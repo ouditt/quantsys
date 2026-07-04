@@ -158,6 +158,10 @@ async def boot() -> None:
     gw.limits.max_order_notional *= scale
     gw.limits.max_position_notional *= scale
     daemon.context["posture"] = lambda: state["posture"]
+    # give every agent live access to fundamentals + news intelligence
+    from . import intel as _intel
+    daemon.context["fundamentals"] = lambda s: _intel.fundamentals(s, _clsname(s))
+    daemon.context["news"] = lambda s: _intel.news(s, _clsname(s))
     state.update(broker=broker, gw=gw, hist=hist, daemon=daemon,
                  venue=venue, vmap=VENUE_SYMBOLS.get(venue),
                  meta={s: (n, c) for s, n, c, _ in UNIVERSE})
@@ -249,23 +253,47 @@ def history(sym: str, bars: int = 380, tf: str = "1D"):
     return {"symbol": sym, "tf": tf, "bars": b}
 
 
+def _clsname(sym: str) -> str:
+    return CLS.get(sym) or (state.get("meta", {}).get(sym, ("", ""))[1] or "")
+
+
 @app.get("/api/news")
 async def news(sym: str):
-    """Real headlines for the symbol being viewed (equities & crypto). Symbols
-    the venue doesn't cover (commodities/FX/index) return an empty list."""
-    broker = state["broker"]
-    if sym not in state["hist"] or not hasattr(broker, "news"):
+    """Merged, sentiment-tagged headlines from the venue feed (Alpaca) AND
+    yfinance (Yahoo), deduped. Analyse-only symbols still get Yahoo coverage."""
+    if sym not in state["hist"]:
         return {"symbol": sym, "items": []}
+    cls = _clsname(sym)
+    broker = state["broker"]
     vmap = state.get("vmap")
     vsym = sym if vmap is None else vmap.get(sym)
-    if not vsym:                       # not venue-served (analyse-only symbol);
-        return {"symbol": sym, "items": []}   # ticker would collide, so no news
-    items = await asyncio.to_thread(broker.news, vsym, 25)
-    from .sentiment import score
-    for it in items:                   # tag each headline pos/neg/neu
-        lbl, net = score((it.get("headline", "") + " " + it.get("summary", "")))
-        it["sentiment"], it["sent_score"] = lbl, net
-    return {"symbol": sym, "items": items}
+    items: list[dict] = []
+    if hasattr(broker, "news") and vsym:          # venue feed (Alpaca)
+        from .sentiment import score
+        a = await asyncio.to_thread(broker.news, vsym, 25)
+        for it in a:
+            it["sentiment"], it["sent_score"] = score(
+                it.get("headline", "") + " " + it.get("summary", ""))
+        items += a
+    from . import intel                            # yfinance / Yahoo feed
+    items += await asyncio.to_thread(intel.news, sym, cls)
+    seen, merged = set(), []                       # dedupe on headline, newest first
+    for it in sorted(items, key=lambda x: x.get("ts", ""), reverse=True):
+        k = (it.get("headline", "")[:60]).lower()
+        if k and k not in seen:
+            seen.add(k)
+            merged.append(it)
+    return {"symbol": sym, "items": merged[:30]}
+
+
+@app.get("/api/fundamentals")
+async def fundamentals(sym: str):
+    """Normalised fundamentals for the instrument (equity ratios / crypto
+    metrics / FX-commodity macro drivers)."""
+    if sym not in state["hist"]:
+        raise HTTPException(404, "unknown symbol")
+    from . import intel
+    return await asyncio.to_thread(intel.fundamentals, sym, _clsname(sym))
 
 
 @app.get("/api/quote")
