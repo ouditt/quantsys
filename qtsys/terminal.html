@@ -1421,16 +1421,16 @@ const LP_TYPES=[["watch","Quote monitor"],["chart","Chart"],["news","News"],
 const LP_LABEL=Object.fromEntries(LP_TYPES);
 let _lpid=1;
 const lpNewId=()=>"t"+(_lpid++)+Date.now().toString(36).slice(-3);
-function lpDefault(){return {cols:3, tiles:[
-  {id:"w1",type:"watch",span:1,syms:["AAPL","MSFT","NVDA","BTC","EURUSD"]},
-  {id:"c1",type:"chart",span:1,sym:"BTC"},
-  {id:"m1",type:"movers",span:1},
-  {id:"n1",type:"news",span:1,sym:"AAPL"},
-  {id:"f1",type:"filings",span:1,sym:"NVDA"},
-  {id:"b1",type:"book",span:1},
+function lpDefault(){return {cols:3, rowH:320, tiles:[
+  {id:"w1",type:"watch",syms:["AAPL","MSFT","NVDA","BTC","EURUSD"]},
+  {id:"c1",type:"chart",sym:"BTC"},
+  {id:"m1",type:"movers"},
+  {id:"n1",type:"news",sym:"AAPL"},
+  {id:"f1",type:"filings",sym:"NVDA"},
+  {id:"b1",type:"book"},
 ]};}
 function lpLoad(){try{const s=JSON.parse(localStorage.getItem("qtsys_launch"));
-  if(s&&Array.isArray(s.tiles))return {cols:s.cols||3,tiles:s.tiles};}catch(e){}
+  if(s&&Array.isArray(s.tiles))return {cols:s.cols||3,rowH:s.rowH||320,tiles:s.tiles};}catch(e){}
   return lpDefault();}
 function lpSave(){try{localStorage.setItem("qtsys_launch",JSON.stringify(S.launch))}catch(e){}}
 async function lpEnsure(sym){        // seed quote+bars for an off-universe symbol without navigating
@@ -1507,29 +1507,31 @@ function lpTileBody(t){
 function lpTile(t){
   const symIn=(t.type==="chart"||t.type==="news"||t.type==="filings"||t.type==="l2")
     ? `<input class="asel" data-lpsym="${t.id}" value="${esc(t.sym||"")}" style="width:66px;text-transform:uppercase" title="symbol">` : "";
-  return `<div class="panel" style="grid-column:span ${t.span||1}" data-lptile="${t.id}"
-      ondragover="event.preventDefault()">
-    <div class="ph" draggable="true" data-lpdrag="${t.id}" style="cursor:grab">
-      <span>${LP_LABEL[t.type]||t.type}</span>
+  return `<div class="panel" data-lptile="${t.id}" ondragover="event.preventDefault()"
+      style="height:100%;display:flex;flex-direction:column;overflow:hidden">
+    <div class="ph" draggable="true" data-lpdrag="${t.id}" style="cursor:grab;flex:0 0 auto">
+      <span style="opacity:.5;margin-right:5px" title="drag to move">⠿</span><span>${LP_LABEL[t.type]||t.type}</span>
       <span class="right" style="display:flex;gap:4px;align-items:center">${symIn}
-        <button class="btn tiny ghost" data-lpspan="${t.id}" title="resize">${(t.span||1)>1?"▭":"▬"}</button>
         <button class="btn tiny danger" data-lprm="${t.id}" title="remove">×</button></span></div>
-    ${lpTileBody(t)}</div>`;
+    <div style="flex:1 1 auto;overflow:auto;min-height:0">${lpTileBody(t)}</div></div>`;
 }
 function vLaunch(){
   if(!S.launch)S.launch=lpLoad();
-  const cols=S.launch.cols||3;
+  const cols=S.launch.cols||3, rowH=S.launch.rowH||320;
   const tiles=S.launch.tiles.map(lpTile).join("")||`<div class="panel"><div class="pb mut">no tiles — add one above</div></div>`;
+  const sizes=[["S",260],["M",320],["L",400],["XL",520]];
   return `
   <div class="panel"><div class="pb" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-    <b>Launchpad</b><span class="mut" style="font-size:10.5px">drag a tile's header to reorder · layout saved to this browser</span>
+    <b>Launchpad</b><span class="mut" style="font-size:10.5px">every tile is the same size · drag the ⠿ header to move · saved to this browser</span>
     <span class="right"></span>
     <select id="lpAdd" class="asel"><option value="">+ Add tile…</option>${LP_TYPES.map(([v,l])=>`<option value="${v}">${l}</option>`).join("")}</select>
     <span class="mut">cols</span>
-    <select id="lpCols" class="asel">${[2,3,4].map(n=>`<option value="${n}"${n===cols?" selected":""}>${n}</option>`).join("")}</select>
+    <select id="lpCols" class="asel">${[2,3,4,5].map(n=>`<option value="${n}"${n===cols?" selected":""}>${n}</option>`).join("")}</select>
+    <span class="mut">size</span>
+    <select id="lpRowH" class="asel">${sizes.map(([l,n])=>`<option value="${n}"${n===rowH?" selected":""}>${l}</option>`).join("")}</select>
     <button class="btn tiny ghost" id="lpReset">reset</button>
   </div></div>
-  <div id="lpgrid" style="display:grid;grid-template-columns:repeat(${cols},1fr);gap:10px;align-items:start">${tiles}</div>`;
+  <div id="lpgrid" style="display:grid;grid-template-columns:repeat(${cols},1fr);grid-auto-rows:${rowH}px;gap:10px">${tiles}</div>`;
 }
 function lpBind(){
   if(!S.launch)S.launch=lpLoad();
@@ -1548,10 +1550,9 @@ function lpBind(){
     else if(v!=="movers"&&v!=="book")t.sym="AAPL";
     S.launch.tiles.push(t);lpSave();render()};
   const cols=$("#lpCols");if(cols)cols.onchange=()=>{S.launch.cols=+cols.value;lpSave();render()};
+  const rh=$("#lpRowH");if(rh)rh.onchange=()=>{S.launch.rowH=+rh.value;lpSave();render()};
   const rst=$("#lpReset");if(rst)rst.onclick=()=>{if(confirm("Reset Launchpad to defaults?")){S.launch=lpDefault();lpSave();render()}};
   $$("[data-lprm]").forEach(b=>b.onclick=()=>{S.launch.tiles=S.launch.tiles.filter(x=>x.id!==b.dataset.lprm);lpSave();render()});
-  $$("[data-lpspan]").forEach(b=>b.onclick=()=>{const t=S.launch.tiles.find(x=>x.id===b.dataset.lpspan);
-    if(t){t.span=(t.span||1)>1?1:2;lpSave();render()}});
   $$("[data-lpsym]").forEach(i=>i.onchange=()=>{const t=S.launch.tiles.find(x=>x.id===i.dataset.lpsym);
     if(t){t.sym=i.value.trim().toUpperCase();lpSave();
       if(t.type==="news")S.assetNews[t.sym]===undefined&&loadNews(t.sym);
