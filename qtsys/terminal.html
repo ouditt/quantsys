@@ -361,7 +361,7 @@ const S={
  audit:{results:[],universe:[],strategies:[]}, auditStrat:"", auditAsset:"", auditAgent:"",
  uni:{running:false,progress:"",last:null,selector:null}, uniResults:[], uniInstruments:[],
  uniSort:{col:"n_fresh_signals",dir:-1}, uniOnlySetups:false, uniTf:"1Day",
- reports:[], reportOpen:null, reportText:"", journalText:"",
+ reports:[], reportOpen:null, reportText:"", reportBusy:null, journalText:"",
  dataFields:null, dataSyms:"AAPL, MSFT, NVDA, BTC/USD",
  dataSel:["last","chg_pct","rsi14","mom_252","pe","sector"], dataRows:null, dataBusy:false,
  launch:null, _lpdrag:null,
@@ -1807,19 +1807,33 @@ function vJournals(){
     const kind=r.name.replace(/_\d+\.txt$/,"").replace(/_/g," ");
     return `<tr class="rowlink${S.reportOpen===r.name?" on":""}" data-report="${esc(r.name)}">
       <td><span class="sym">${esc(kind)}</span></td><td class="mut">${(r.name.match(/(\d{4})(\d{2})(\d{2})/)||[]).slice(1).join("-")||"—"}</td>
-      <td class="mut">${dt}</td></tr>`}).join("")
-    :`<tr><td colspan="3" class="mut">No reports filed yet. Agents write briefings, risk reports and daily wraps to <code>reports/</code> when their scheduled tasks fire — turn the master switch ON (Agents tab) so they run.</td></tr>`;
+      <td class="mut">${dt}</td><td style="width:20px"><button class="btn tiny danger" data-repdel="${esc(r.name)}" title="delete">×</button></td></tr>`}).join("")
+    :`<tr><td colspan="4" class="mut">No reports filed yet. Generate one above, or turn the agents' master switch ON so their scheduled tasks file to <code>reports/</code>.</td></tr>`;
+  const busy=S.reportBusy;
   return `
+  <div class="panel"><div class="pb" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <b>Briefing Center</b><span class="mut" style="font-size:10.5px">generate on demand — runs the real routine now, no waiting for the daily cadence</span>
+    <span class="right"></span>
+    <button class="btn" data-gen="brief"${busy?" disabled":""}>Daily Brief</button>
+    <button class="btn tiny ghost" data-gen="morning_briefing"${busy?" disabled":""}>Morning briefing</button>
+    <button class="btn tiny ghost" data-gen="risk_report"${busy?" disabled":""}>Risk report</button>
+    <button class="btn tiny ghost" data-gen="daily_wrap"${busy?" disabled":""}>Daily wrap</button>
+    ${busy?`<span class="mut">${esc(busy)}…</span>`:""}
+  </div></div>
   <div class="cols"><div>
-  <div class="panel"><div class="ph">Agent journals · reports/ <span class="right mut">${reps.length} filed</span></div>
-    <table><thead><tr><th>Report</th><th>Date</th><th>Filed</th></tr></thead><tbody>${list}</tbody></table></div>
+  <div class="panel"><div class="ph">Filed reports · reports/ <span class="right mut">${reps.length}</span></div>
+    <table><thead><tr><th>Report</th><th>Date</th><th>Filed</th><th></th></tr></thead><tbody>${list}</tbody></table></div>
   <div class="panel"><div class="ph">Trade journal · weekly review</div>
     <pre class="pb" style="white-space:pre-wrap;font-size:11px;line-height:1.5;margin:0">${esc(S.journalText||"loading…")}</pre></div>
   </div><div>
-  <div class="panel"><div class="ph">${S.reportOpen?esc(S.reportOpen):"Report viewer"}</div>
-    <pre class="pb" style="white-space:pre-wrap;font-size:11px;line-height:1.5;margin:0;max-height:340px;overflow:auto">${esc(S.reportText||"Click a report on the left to read it.")}</pre></div>
+  <div class="panel"><div class="ph">${S.reportOpen?esc(S.reportOpen):"Report viewer"}
+    ${S.reportText?`<span class="right" style="display:flex;gap:4px">
+      <button class="btn tiny ghost" id="repCopy">Copy</button>
+      <button class="btn tiny ghost" id="repDl">Download .md</button>
+      <button class="btn tiny ghost" id="repPrint">Print</button></span>`:""}</div>
+    <pre class="pb" id="repView" style="white-space:pre-wrap;font-size:11px;line-height:1.5;margin:0;max-height:52vh;overflow:auto">${esc(S.reportText||"Click a report on the left, or generate one above.")}</pre></div>
   <div class="panel"><div class="ph">Live agent log</div>
-    <div class="pb" style="max-height:280px;overflow:auto">${(S.alog||[]).slice(0,50).map(x=>
+    <div class="pb" style="max-height:220px;overflow:auto">${(S.alog||[]).slice(0,50).map(x=>
       `<div class="logline"><span class="t">${new Date(x.ts*1000).toTimeString().slice(0,5)}</span>
        <span class="m"><b>${esc(x.agent)}</b> ${esc(x.message)}</span></div>`).join("")||'<span class="mut">no agent activity yet — master switch is OFF</span>'}</div></div>
   </div></div>`;
@@ -1829,6 +1843,28 @@ async function loadReport(name){
   try{const r=await j("/api/reports/"+encodeURIComponent(name));S.reportText=r.text||"(empty)"}
   catch(e){S.reportText="(failed to load report)"}
   render();
+}
+async function refreshReports(){try{S.reports=(await j("/api/reports")).reports||[];if(S.page==="journal")render()}catch(e){}}
+async function genReport(kind){
+  if(S.reportBusy)return;
+  S.reportBusy=kind==="brief"?"composing brief":"generating "+kind.replace(/_/g," ");render();
+  try{
+    if(kind==="brief"){const r=await j("/api/brief");S.reportOpen="Daily Brief";S.reportText=r.text||"(empty)";}
+    else{const r=await j("/api/reports/generate?kind="+kind,{method:"POST"});
+      S.reportOpen=r.name;S.reportText=r.text||"(empty)";await refreshReports();}
+    toast("report ready","ok");
+  }catch(e){toast(e.detail||"generation failed","err")}
+  S.reportBusy=null;render();
+}
+function reportDownload(){
+  const name=(S.reportOpen||"report").replace(/\.txt$/,"").replace(/\s+/g,"_")+".md";
+  const b=new Blob([S.reportText||""],{type:"text/markdown"}),a=document.createElement("a");
+  a.href=URL.createObjectURL(b);a.download=name;a.click();URL.revokeObjectURL(a.href);toast("downloaded "+name,"ok");
+}
+function reportPrint(){
+  const w=window.open("","_blank");if(!w){toast("popup blocked","err");return}
+  w.document.write(`<pre style="font:12px/1.5 ui-monospace,monospace;white-space:pre-wrap;padding:24px">${esc(S.reportText||"")}</pre>`);
+  w.document.close();w.focus();w.print();
 }
 function vAudit(){
   const A=S.audit||{results:[],universe:[],strategies:[]};
@@ -2082,6 +2118,19 @@ document.addEventListener("click",e=>{
   if(ro){resolveSym(ro.dataset.resolve);return}
   const strat=e.target.closest("[data-strat]");
   if(strat){S.stratOpen=S.stratOpen===strat.dataset.strat?null:strat.dataset.strat;render();return}
+  const gen=e.target.closest("[data-gen]");
+  if(gen){genReport(gen.dataset.gen);return}
+  const rdel=e.target.closest("[data-repdel]");
+  if(rdel){const nm=rdel.dataset.repdel;
+    j("/api/reports/"+encodeURIComponent(nm),{method:"DELETE"}).then(()=>{
+      if(S.reportOpen===nm){S.reportOpen=null;S.reportText=""}refreshReports();toast("deleted","ok")})
+      .catch(()=>toast("delete failed","err"));return}
+  const rc=e.target.closest("#repCopy");
+  if(rc){copyText(S.reportText||"","report copied");return}
+  const rdl=e.target.closest("#repDl");
+  if(rdl){reportDownload();return}
+  const rpr=e.target.closest("#repPrint");
+  if(rpr){reportPrint();return}
   const rep=e.target.closest("[data-report]");
   if(rep){loadReport(rep.dataset.report);return}
   const nv=e.target.closest("[data-nav]");

@@ -1145,6 +1145,99 @@ def journal():
         return {"text": f"journal read error: {e}"}
 
 
+_REPORT_KINDS = ("morning_briefing", "risk_report", "daily_wrap")
+
+
+def _gen_report(kind: str) -> str:
+    if kind == "morning_briefing":
+        from .routine import morning_briefing
+        return morning_briefing()
+    if kind == "risk_report":
+        from .portfolio_risk import report as _risk
+        w = state["daemon"].context.get("weights", lambda: None)()
+        return _risk(w) if w else _risk()
+    if kind == "daily_wrap":
+        jp = os.path.join(HERE, "journal.db")
+        if os.path.exists(jp):
+            from .journal import Journal
+            return Journal(jp).weekly_review()
+        return "Daily wrap: journal empty — no live/paper fills logged yet."
+    raise HTTPException(400, "unknown report kind")
+
+
+def _save_report_file(name: str, text: str) -> str:
+    d = os.path.join(HERE, "reports")
+    os.makedirs(d, exist_ok=True)
+    fn = f"{name}_{time.strftime('%Y%m%d')}.txt"
+    with open(os.path.join(d, fn), "w") as f:
+        f.write(text)
+    return fn
+
+
+@app.post("/api/reports/generate")
+async def report_generate(kind: str):
+    """Run a report's real routine NOW (don't wait for the agent's daily
+    cadence) and persist it to reports/. kind ∈ morning_briefing|risk_report|
+    daily_wrap."""
+    if kind not in _REPORT_KINDS:
+        raise HTTPException(400, f"kind must be one of {_REPORT_KINDS}")
+    text = await asyncio.to_thread(_gen_report, kind)
+    fn = await asyncio.to_thread(_save_report_file, kind, text)
+    return {"name": fn, "text": text}
+
+
+@app.delete("/api/reports/{name}")
+def report_delete(name: str):
+    fp = os.path.join(HERE, "reports", os.path.basename(name))   # no traversal
+    if os.path.isfile(fp):
+        os.remove(fp)
+        return {"ok": True, "deleted": os.path.basename(name)}
+    raise HTTPException(404, "no such report")
+
+
+def _compose_brief() -> str:
+    """A single consolidated morning note in Markdown, live from current state:
+    account, posture, top movers, and the ranked setups."""
+    import datetime
+    q = state["daemon"].context["quotes"]
+    try:
+        acct = state["daemon"].context["account"]() or {}
+    except Exception:
+        acct = {}
+    posture = state.get("posture", "—")
+    L = [f"# QTSYS Daily Brief — {datetime.date.today()}", ""]
+    eq, dp = acct.get("equity"), acct.get("day_pnl")
+    if eq is not None:
+        L.append(f"**Account:** equity ${eq:,.0f} · day P&L {dp:+,.0f}"
+                 if dp is not None else f"**Account:** equity ${eq:,.0f}")
+    L.append(f"**Posture:** {posture}")
+    L.append("")
+    movers = sorted(((s, v) for s, v in q.items() if v.get("chg_pct") is not None),
+                    key=lambda kv: abs(kv[1]["chg_pct"]), reverse=True)[:8]
+    if movers:
+        L.append("## Top movers")
+        for s, v in movers:
+            last = v.get("last")
+            L.append(f"- **{s}** {v['chg_pct']:+.2f}%" +
+                     (f" · last {last:g}" if isinstance(last, (int, float)) else ""))
+        L.append("")
+    try:
+        from .routine import morning_briefing
+        L.append("## Ranked setups")
+        L.append("```")
+        L.append(morning_briefing())
+        L.append("```")
+    except Exception as e:
+        L.append(f"_ranked setups unavailable: {e}_")
+    return "\n".join(L)
+
+
+@app.get("/api/brief")
+async def brief():
+    """Consolidated Markdown daily brief (account + posture + movers + setups)."""
+    return {"text": await asyncio.to_thread(_compose_brief)}
+
+
 @app.get("/api/scan")
 async def api_scan():
     """Morning scan (cards 1/4): fresh setups ranked by their own real
