@@ -165,6 +165,27 @@ async def boot() -> None:
     from . import filings as _filings         # SEC EDGAR primary disclosure
     daemon.context["filings"] = lambda s: _filings.filings(s, forms=_filings.MATERIAL_FORMS)
     daemon.context["filing_summary"] = lambda s: _filings.summary(s, daemon.llm_fn)
+    def _live_weights() -> dict:
+        """Signed notional/equity per DISPLAY symbol from live positions —
+        feeds the risk engine so VaR/factors/attribution describe the REAL
+        book, not a demo. Venue symbols map back (BTC/USD -> BTC)."""
+        try:
+            acct = broker.get_account()
+            eq = float(acct.get("equity") or 0)
+            if eq <= 0:
+                return {}
+            rmap = {v: k for k, v in (VENUE_SYMBOLS.get(venue) or {}).items()}
+            out = {}
+            for p in broker.get_positions():
+                sym = rmap.get(p.symbol, p.symbol)
+                q = state["daemon"].context["quotes"].get(sym, {})
+                px = q.get("last") or p.avg_price
+                if px:
+                    out[sym] = out.get(sym, 0.0) + p.qty * px / eq
+            return {k: round(v, 4) for k, v in out.items() if abs(v) > 1e-4}
+        except Exception:
+            return {}
+    daemon.context["weights"] = _live_weights
     if hasattr(broker, "crypto_orderbook"):   # free crypto L2 + benefit experiment
         daemon.context["orderbook"] = broker.crypto_orderbook
         try:
@@ -683,10 +704,12 @@ def _build_chain(broker, sym, exp) -> dict:
             r = float(v) / 100.0
     except Exception:
         pass
+    smiles = []
     try:                                        # analytics core: arb-free surface
         from . import volsurface
         res = volsurface.build(contracts, spot or 0.0, r)
         enriched, surface = res["contracts"], res["surface"]
+        smiles = res.get("smiles", [])
     except Exception:
         enriched, surface = options.enrich_chain(contracts, spot or 0.0, r), []
     exps = sorted({c["expiration"] for c in enriched})
@@ -701,7 +724,8 @@ def _build_chain(broker, sym, exp) -> dict:
                                                 "theta", "vega", "gate_ok")}
     chain = [byk[k] for k in sorted(byk)]
     return {"underlying": sym, "spot": spot, "r": r, "expiration": pick,
-            "expirations": exps, "chain": chain, "surface": surface}
+            "expirations": exps, "chain": chain, "surface": surface,
+            "smiles": smiles}
 
 
 @app.get("/api/industry")
@@ -811,6 +835,69 @@ async def orderbook_api(sym: str, notional: float = 5000.0):
     from . import orderbook as _ob
     return {"symbol": sym, "venue_symbol": vsym, "book": book,
             "metrics": _ob.metrics(book, notional)}
+
+
+@app.get("/api/exec/plan")
+async def exec_plan(sym: str, qty: float, minutes: int = 60,
+                    algo: str = "twap", urgency: str = "neutral"):
+    """Execution-algo planner (TWAP/VWAP/IS): slice schedule + cost estimate
+    vs arrival. Crypto impact comes from walking the REAL L2 book; slices
+    are proposals — each order still passes the gateway individually."""
+    from . import execalgo
+    sym = sym.upper()
+    if sym not in state["hist"]:
+        try:
+            resolve(sym)
+        except Exception:
+            raise HTTPException(404, "unknown symbol")
+
+    def _build():
+        q = state["daemon"].context["quotes"].get(sym, {})
+        px = q.get("last") or 0.0
+        closes = [b["c"] for b in state["hist"].get(sym, [])][-63:]
+        import numpy as np
+        sig_d = (float(np.std(np.diff(closes) / np.array(closes[:-1])))
+                 if len(closes) > 20 else 0.015)
+        step_min = minutes / max(min(minutes // 5, 24), 2)
+        sigma_int = sig_d * math.sqrt(step_min / 390.0)
+        spread = 0.0
+        slip_fn = None
+        broker = state["broker"]
+        vmap = state.get("vmap") or {}
+        vsym = vmap.get(sym, sym)
+        if "/" in vsym and hasattr(broker, "crypto_orderbook"):
+            book = broker.crypto_orderbook(vsym, 20)
+            if book.get("bids") and book.get("asks"):
+                spread = book["asks"][0][0] - book["bids"][0][0]
+                from . import orderbook as _ob
+                slip_fn = lambda n: (_ob.metrics(book, n) or {}).get("slip_buy_bps")
+        return execalgo.plan(qty, minutes, algo, price=px, spread=spread,
+                             sigma_interval=sigma_int, urgency=urgency,
+                             l2_slip_fn=slip_fn)
+    out = await asyncio.to_thread(_build)
+    out["symbol"] = sym
+    return out
+
+
+@app.get("/api/risk/attribution")
+async def risk_attribution():
+    """PORT-lite risk core on the LIVE book: factor exposures (observable
+    real-data factors), Euler tail attribution per position, VaR/CVaR."""
+    from . import portfolio_risk as pr
+    w = state["daemon"].context.get("weights", lambda: {})() or {}
+    if not w:
+        return {"weights": {}, "note": "book flat or no covered positions"}
+
+    def _calc():
+        pnl = pr.portfolio_series(w)
+        v99, c99 = pr.var_cvar(pnl, 0.99)
+        v95, c95 = pr.var_cvar(pnl, 0.95)
+        return {"weights": w,
+                "var": {"var99": round(v99, 5), "cvar99": round(c99, 5),
+                        "var95": round(v95, 5), "cvar95": round(c95, 5)},
+                "factors": pr.factor_exposures(w),
+                "attribution": pr.attribution(w)}
+    return await asyncio.to_thread(_calc)
 
 
 @app.get("/api/l2/report")

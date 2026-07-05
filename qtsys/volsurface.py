@@ -267,6 +267,20 @@ class Surface:
                 lo, f_lo = mid, delta(mid) - want
         return (lo + hi) / 2
 
+    def smiles(self, n: int = 33) -> list[dict]:
+        """Sampled vol(k) curves per expiry over each slice's fitted domain —
+        for plotting. Strike = F·e^k so the client can draw either axis."""
+        out = []
+        for i, s in enumerate(self.slices):
+            ks = np.linspace(s["krange"][0] + 0.05, s["krange"][1] - 0.05, n)
+            pts = []
+            for k in ks:
+                w = self._w_floor(float(k), i)
+                pts.append([round(float(s["F"] * math.exp(k)), 4),
+                            round(math.sqrt(w / s["T"]), 5)])
+            out.append({"exp": s["exp"], "F": round(s["F"], 4), "points": pts})
+        return out
+
     def metrics(self) -> list[dict]:
         out = []
         for i, s in enumerate(self.slices):
@@ -354,7 +368,8 @@ def build(contracts: list[dict], spot: float, r: float = 0.04) -> dict:
         out.append({**c, "iv": iv, "delta": delta, "gamma": gamma,
                     "theta": theta, "vega": vega,
                     "iv_src": "surface" if iv is not None else None})
-    return {"contracts": out, "surface": surf.metrics(), "spot": spot, "r": r}
+    return {"contracts": out, "surface": surf.metrics(),
+            "smiles": surf.smiles(), "spot": spot, "r": r}
 
 
 # ---------------------------------------------------------------- self-test

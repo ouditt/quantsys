@@ -346,9 +346,15 @@ class AgentDaemon:
             except Exception:
                 pass
         self._save_report("fundamental_brief", txt)
+        n_pit = 0
+        try:                       # accumulate the point-in-time vintage store
+            from .pit import PITStore
+            n_pit = PITStore().snapshot([s for s, _ in rows], fund)
+        except Exception:
+            pass
         return (f"FUNDAMENTAL BRIEF filed -> reports/; favours "
                 f"{', '.join(s for s, _ in ranked[:3])}; "
-                f"richest {ranked[-1][0]}")
+                f"richest {ranked[-1][0]}; PIT vintages +{n_pit}")
 
     # --------------------------------------------------------- arb strategy
     _ARB_SYMS = ("WTI", "BRENT", "NATGAS", "BTC", "ETH",

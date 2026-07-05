@@ -1172,7 +1172,10 @@ function vOptions(){
       <td class="num mut">${x.n_fit}</td><td class="num mut">${x.fit_rmse_vol==null?"—":(x.fit_rmse_vol*100).toFixed(2)}</td>
       <td>${x.butterfly_ok?'<span class="pill up">clean</span>':'<span class="pill dn">arb?</span>'}</td></tr>`).join("")}
     </tbody></table>
-    <div class="note">Negative 25Δ RR = put skew (downside insurance bid). Fly = smile curvature. RMSE in vol points — how tight the SVI fit is to gated quotes.</div></div>`:"";
+    <div class="note">Negative 25Δ RR = put skew (downside insurance bid). Fly = smile curvature. RMSE in vol points — how tight the SVI fit is to gated quotes.</div></div>
+  <div class="panel"><div class="ph">Smile · vol(strike) by expiry <span class="right mut">arb-free SVI read-out · spot marked</span></div>
+    <div class="pb"><canvas id="smilecv" style="width:100%;height:230px;display:block"></canvas>
+    <div id="smileleg" class="mut" style="font-size:10.5px;margin-top:5px"></div></div></div>`:"";
   return `${back}
   <div id="sec-head"><h1>Options · ${esc(d.underlying)}</h1>
     <span class="chip">spot ${nn(spot)}</span><span class="chip">r ${(d.r*100).toFixed(2)}%</span>
@@ -1185,6 +1188,43 @@ function vOptions(){
       <tr><th>Bid</th><th>Ask</th><th>Last</th><th>IV</th><th>Δ</th><th>OI</th><th></th><th>Bid</th><th>Ask</th><th>Last</th><th>IV</th><th>Δ</th><th>OI</th></tr>
     </thead><tbody>${rows}</tbody></table></div>
     <div class="note">Live Alpaca chain. IV is read from the <b>no-arbitrage SVI surface</b> (fitted to quality-gated OTM quotes via American-binomial inversion with the parity-implied carry) — deep-ITM strikes price cleanly where a raw mid inversion is ill-posed. Greeks off surface vol. Click a strike to open that contract.</div></div>`;
+}
+function drawSmiles(){
+  const cv=$("#smilecv"),d=S.options;
+  if(!cv||!d||!(d.smiles||[]).length)return;
+  const dpr=devicePixelRatio||1,W=cv.clientWidth||600,H=cv.clientHeight||230;
+  cv.width=W*dpr;cv.height=H*dpr;const x=cv.getContext("2d");x.scale(dpr,dpr);
+  const spot=d.spot,L=46,R=8,T=8,B=20,pw=W-L-R,ph=H-T-B;
+  const lo=spot*0.82,hi=spot*1.18;                       // plot window ±18%
+  let vmin=1e9,vmax=0;
+  const series=d.smiles.map(s=>{
+    const pts=s.points.filter(p=>p[0]>=lo&&p[0]<=hi);
+    pts.forEach(p=>{vmin=Math.min(vmin,p[1]);vmax=Math.max(vmax,p[1])});
+    return {exp:s.exp,pts};
+  }).filter(s=>s.pts.length>2);
+  if(!series.length)return;
+  vmin*=0.94;vmax*=1.06;
+  const X=k=>L+(k-lo)/(hi-lo)*pw, Y=v=>T+ph-(v-vmin)/(vmax-vmin)*ph;
+  x.strokeStyle="#1c2733";x.fillStyle="#5b6b7d";x.font="10px ui-monospace,monospace";
+  for(let i=0;i<=4;i++){const v=vmin+(vmax-vmin)*i/4,y=Y(v);
+    x.beginPath();x.moveTo(L,y);x.lineTo(W-R,y);x.stroke();
+    x.fillText((v*100).toFixed(0)+"%",4,y+3);}
+  for(let i=0;i<=4;i++){const k=lo+(hi-lo)*i/4;
+    x.fillText(k.toFixed(0),X(k)-12,H-6);}
+  x.strokeStyle="#3a2f16";x.setLineDash([4,3]);          // spot marker
+  x.beginPath();x.moveTo(X(spot),T);x.lineTo(X(spot),T+ph);x.stroke();
+  x.setLineDash([]);
+  const cols=["#ffb200","#ff8f5b","#e06aff","#5bc9ff","#27d17f","#8fa3ff","#ff5063"];
+  const leg=[];
+  series.forEach((s,i)=>{
+    const c=cols[i%cols.length];x.strokeStyle=c;x.lineWidth=i===0?1.8:1.2;
+    x.globalAlpha=i===0?1:0.75;
+    x.beginPath();
+    s.pts.forEach((p,j)=>{const px=X(p[0]),py=Y(p[1]);j?x.lineTo(px,py):x.moveTo(px,py)});
+    x.stroke();x.globalAlpha=1;
+    leg.push(`<span style="color:${c}">■</span> ${s.exp.slice(5)}`);
+  });
+  const lg=$("#smileleg");if(lg)lg.innerHTML=leg.join(" &nbsp; ")+` &nbsp; <span style="color:#8a6a1f">┆ spot ${spot?spot.toFixed(2):""}</span>`;
 }
 async function loadFund(s){
   if(S.mode!=="live"||S.fund[s]!==undefined||S._floading.has(s))return;
@@ -2011,6 +2051,7 @@ function render(scroll){
   $$("canvas.spark").forEach(cv=>{const s=cv.dataset.spark,q=S.quotes[s];
     drawSpark(cv,q.spark,q.spark.at(-1)>=q.spark[0])});
   if(S.page==="industry")drawPie();
+  if(S.page==="options")drawSmiles();
   if(S.page==="security"){drawChart(S.sym);
     loadNews(S.sym);loadFund(S.sym);loadFilings(S.sym);
     if((META[S.sym]||{}).cls==="Crypto")loadL2(S.sym,true);
