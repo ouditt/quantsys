@@ -14,4 +14,7 @@ venv/
 # universe scan runtime data (bars cache, ML selector store/model)
 qtsys/universe_cache/
 *.pkl
-qtsys/registry_results_*.csv
+# scan output churns on every run — written at runtime, not source-controlled
+qtsys/registry_results*.csv
+# agent-generated briefings/reports — regenerated on demand, not source
+qtsys/reports/
