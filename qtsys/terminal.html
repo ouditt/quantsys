@@ -367,6 +367,7 @@ const S={
  launch:null, _lpdrag:null,
 };
 S.filings={}; S.filingSum={};
+S.l2={}; S._l2load={};
 S._nloading=new Set();S._floading=new Set();S._flgloading=new Set();S._lpload=new Set();
 try{Object.assign(S.p,JSON.parse(localStorage.getItem("qtsys_params")||"{}"))}catch(e){}
 const saveParams=()=>{try{localStorage.setItem("qtsys_params",JSON.stringify(S.p))}catch(e){}};
@@ -1015,6 +1016,9 @@ function vSecurity(){
   <div class="panel"><div class="ph">Fundamentals · ${s}</div>
     <div id="fundbox">${renderFund(s)}</div></div>
 
+  ${m.cls==="Crypto"?`<div class="panel"><div class="ph">Order book · L2 depth <span class="right mut">live · free feed</span></div>
+    <div class="l2live" data-l2sym="${esc(s)}">${renderL2(s)}</div></div>`:""}
+
   <div class="panel"><div class="ph">News · ${s}${(()=>{const it=S.assetNews[s]||[];if(!it.length)return "";
     const p=it.filter(n=>n.sentiment==="pos").length,ng=it.filter(n=>n.sentiment==="neg").length;
     return `<span class="right mut"><span class="up">${p}▲</span> <span class="dn">${ng}▼</span> · ${it.length}</span>`})()}</div>
@@ -1413,7 +1417,7 @@ async function addAlert(){
 async function pollAlerts(){try{S.alerts=await j("/api/alerts");if(S.page==="alerts")render()}catch(e){}}
 /* ============================================================ LAUNCHPAD */
 const LP_TYPES=[["watch","Quote monitor"],["chart","Chart"],["news","News"],
-  ["filings","SEC filings"],["movers","Top movers"],["book","Positions"]];
+  ["filings","SEC filings"],["l2","Depth (L2)"],["movers","Top movers"],["book","Positions"]];
 const LP_LABEL=Object.fromEntries(LP_TYPES);
 let _lpid=1;
 const lpNewId=()=>"t"+(_lpid++)+Date.now().toString(36).slice(-3);
@@ -1475,6 +1479,9 @@ function lpTileBody(t){
     return f.items.slice(0,6).map(x=>`<a class="logline nl" href="${esc(x.url)}" target="_blank" rel="noopener">
       <span class="t">${esc(x.date)}</span><span class="m"><span class="pill ${FORM_TAG[x.form]||""}" style="min-width:40px;text-align:center">${esc(x.form)}</span> ${esc(x.title||x.form)}</span></a>`).join("");
   }
+  if(t.type==="l2"){
+    return `<div class="l2live" data-l2sym="${esc(t.sym)}">${renderL2(t.sym)}</div>`;
+  }
   if(t.type==="movers"){
     const ms=Object.keys(S.quotes).filter(s=>S.quotes[s]&&S.quotes[s].prevClose&&META[s])
       .map(s=>[s,chgOf(s)]).filter(x=>isFinite(x[1])&&x[1]!==0);
@@ -1498,7 +1505,7 @@ function lpTileBody(t){
   return `<div class="pb mut">unknown tile</div>`;
 }
 function lpTile(t){
-  const symIn=(t.type==="chart"||t.type==="news"||t.type==="filings")
+  const symIn=(t.type==="chart"||t.type==="news"||t.type==="filings"||t.type==="l2")
     ? `<input class="asel" data-lpsym="${t.id}" value="${esc(t.sym||"")}" style="width:66px;text-transform:uppercase" title="symbol">` : "";
   return `<div class="panel" style="grid-column:span ${t.span||1}" data-lptile="${t.id}"
       ondragover="event.preventDefault()">
@@ -1532,10 +1539,13 @@ function lpBind(){
     if(t.type==="watch")(t.syms||[]).forEach(lpEnsure);
     if(t.type==="news"&&t.sym){lpEnsure(t.sym);loadNews(t.sym);}
     if(t.type==="filings"&&t.sym){lpEnsure(t.sym);loadFilings(t.sym);}
+    if(t.type==="l2"&&t.sym)loadL2(t.sym,true);
   });
   const add=$("#lpAdd");if(add)add.onchange=()=>{const v=add.value;if(!v)return;
     const t={id:lpNewId(),type:v,span:1};
-    if(v==="watch")t.syms=["AAPL"];if(v!=="movers"&&v!=="book"&&v!=="watch")t.sym="AAPL";
+    if(v==="watch")t.syms=["AAPL"];
+    else if(v==="l2")t.sym="BTC/USD";
+    else if(v!=="movers"&&v!=="book")t.sym="AAPL";
     S.launch.tiles.push(t);lpSave();render()};
   const cols=$("#lpCols");if(cols)cols.onchange=()=>{S.launch.cols=+cols.value;lpSave();render()};
   const rst=$("#lpReset");if(rst)rst.onclick=()=>{if(confirm("Reset Launchpad to defaults?")){S.launch=lpDefault();lpSave();render()}};
@@ -1546,6 +1556,7 @@ function lpBind(){
     if(t){t.sym=i.value.trim().toUpperCase();lpSave();
       if(t.type==="news")S.assetNews[t.sym]===undefined&&loadNews(t.sym);
       if(t.type==="filings")S.filings[t.sym]===undefined&&loadFilings(t.sym);
+      if(t.type==="l2")loadL2(t.sym,true);
       lpEnsure(t.sym);render()}});
   $$("[data-lpwadd]").forEach(i=>i.onkeydown=(e)=>{if(e.key!=="Enter")return;
     const t=S.launch.tiles.find(x=>x.id===i.dataset.lpwadd);const s=i.value.trim().toUpperCase();
@@ -1566,6 +1577,44 @@ function lpBind(){
   // draw the chart-tile sparklines
   $$("#lpgrid canvas.spark").forEach(cv=>{const s=cv.dataset.spark,q=S.quotes[s];
     if(q&&q.spark&&q.spark.length)drawSpark(cv,q.spark,q.spark.at(-1)>=q.spark[0])});
+}
+/* ============================================================ L2 depth ladder (crypto) */
+function renderL2(sym){
+  const d=S.l2[sym];
+  if(!d)return `<div class="pb mut">loading depth…</div>`;
+  const book=d.book,m=d.metrics||{};
+  if(!book||!(book.bids||[]).length||!(book.asks||[]).length)
+    return `<div class="pb mut">no live L2 depth for ${esc(sym)} — crypto pairs only</div>`;
+  const asks=book.asks.slice(0,8),bids=book.bids.slice(0,8);
+  const mx=Math.max(...asks.map(a=>a[1]),...bids.map(b=>b[1]),1e-9);
+  const bar=(sz,side)=>`<div style="position:absolute;top:0;bottom:0;${side==='ask'?'right':'left'}:0;width:${(sz/mx*100).toFixed(0)}%;background:${side==='ask'?'rgba(255,80,99,.15)':'rgba(39,209,127,.15)'}"></div>`;
+  const row=(lv,side)=>`<div style="position:relative;display:flex;justify-content:space-between;padding:2px 7px;font-size:11px">
+    ${bar(lv[1],side)}<span style="position:relative" class="num ${side==='ask'?'dn':'up'}">${fmt(lv[0],pxd(sym))}</span>
+    <span style="position:relative" class="num mut">${(+lv[1]).toFixed(4)}</span></div>`;
+  const imb=m.imbalance||0,imbPct=((imb+1)/2*100).toFixed(0);
+  const bias=imb>0.05?"bid-heavy":imb<-0.05?"ask-heavy":"balanced";
+  return `<div class="pb" style="padding:6px 0">
+    <div style="display:flex;justify-content:space-between;font-size:10.5px;padding:0 7px 4px" class="mut">
+      <span>spread ${m.spread_bps??"—"} bps</span>
+      <span title="expected slippage to fill a $5k order by walking the book">slip ±${m.slip_buy_bps??"—"} bps</span></div>
+    ${asks.slice().reverse().map(a=>row(a,'ask')).join("")}
+    <div style="text-align:center;padding:3px;font-size:10.5px;border-block:1px solid var(--line)" class="num">mid ${fmt(m.mid,pxd(sym))}</div>
+    ${bids.map(b=>row(b,'bid')).join("")}
+    <div style="margin:7px 7px 0;height:6px;border-radius:3px;overflow:hidden;background:rgba(255,80,99,.22);position:relative">
+      <div style="position:absolute;left:0;top:0;bottom:0;width:${imbPct}%;background:rgba(39,209,127,.5)"></div></div>
+    <div class="mut" style="font-size:10px;text-align:center;margin-top:3px">book imbalance ${(imb*100).toFixed(0)}% · ${bias}${m.depth_exhausted?" · ⚠ thin for $5k":""}</div>
+  </div>`;
+}
+async function loadL2(sym,force){
+  const crypto=sym&&(sym.indexOf("/")>=0||(META[sym]||{}).cls==="Crypto");
+  if(!crypto||S.mode!=="live")return;                          // crypto only
+  const now=Date.now();
+  if(!force&&now-(S._l2load[sym]||0)<1500)return;              // throttle ~1.5s
+  S._l2load[sym]=now;
+  try{const r=await j("/api/orderbook?sym="+encodeURIComponent(sym));
+    S.l2[sym]={book:r.book,metrics:r.metrics};}
+  catch(e){return}
+  document.querySelectorAll('.l2live[data-l2sym="'+sym+'"]').forEach(el=>el.innerHTML=renderL2(sym));
 }
 /* ============================================================ DATA (BQL-style data-out) */
 const DATA_CATS=[["price","Price"],["technical","Technical"],["fundamental","Fundamental"],["news","News"]];
@@ -1947,6 +1996,7 @@ function render(scroll){
   if(S.page==="industry")drawPie();
   if(S.page==="security"){drawChart(S.sym);
     loadNews(S.sym);loadFund(S.sym);loadFilings(S.sym);
+    if((META[S.sym]||{}).cls==="Crypto")loadL2(S.sym,true);
     const fsm=$("#filSum");if(fsm)fsm.onclick=()=>summarizeFilings(S.sym);
     if(S.gran!=="1D"&&!(S.ibars[S.sym]&&S.ibars[S.sym].length))setGran(S.gran);
     const cv=$("#chart");cv.onpointermove=chartHover;cv.onpointerleave=()=>$("#xhair").style.display="none";
@@ -2033,6 +2083,7 @@ function lightRepaint(){
       drawSpark(cv,q.spark,q.spark.at(-1)>=q.spark[0])});
   }
   if(S.page==="security"&&CH)drawChart(S.sym);
+  if(S.page==="security"&&(META[S.sym]||{}).cls==="Crypto")loadL2(S.sym);
   if(S.page==="launch"){ // update rows (watch/movers) + redraw chart sparks in place
     $$("#lpgrid tr.rowlink[data-resolve]").forEach(tr=>{const s=tr.dataset.resolve,q=S.quotes[s];if(!q)return;
       const tds=tr.querySelectorAll("td");if(tds.length<3)return;
@@ -2040,6 +2091,7 @@ function lightRepaint(){
       const ch=chgOf(s);tds[2].textContent=pct(ch);tds[2].className="num "+cls(ch);});
     $$("#lpgrid canvas.spark").forEach(cv=>{const s=cv.dataset.spark,q=S.quotes[s];
       if(q&&q.spark&&q.spark.length)drawSpark(cv,q.spark,q.spark.at(-1)>=q.spark[0])});
+    $$("#lpgrid .l2live[data-l2sym]").forEach(el=>loadL2(el.dataset.l2sym));   // refresh L2 ladders
   }
   tapeFill();
 }

@@ -792,13 +792,20 @@ async def quote_one(sym: str):
 
 @app.get("/api/orderbook")
 async def orderbook_api(sym: str, notional: float = 5000.0):
-    """Live L2 depth-of-book + microstructure metrics for a crypto pair (free)."""
+    """Live L2 depth-of-book + microstructure metrics for a crypto pair (free).
+    Accepts a venue pair (BTC/USD) or a bundled display symbol (BTC)."""
     broker = state["broker"]
-    if not hasattr(broker, "crypto_orderbook") or "/" not in sym:
+    if not hasattr(broker, "crypto_orderbook"):
+        raise HTTPException(400, "no L2 order-book source on this broker")
+    vsym = sym
+    if "/" not in vsym:                           # map display symbol -> venue pair
+        vsym = (state.get("vmap") or {}).get(sym) or f"{sym}/USD"
+    if "/" not in vsym:
         raise HTTPException(400, "crypto L2 order book is available for crypto pairs only")
-    book = await asyncio.to_thread(broker.crypto_orderbook, sym, 20)
+    book = await asyncio.to_thread(broker.crypto_orderbook, vsym, 20)
     from . import orderbook as _ob
-    return {"symbol": sym, "book": book, "metrics": _ob.metrics(book, notional)}
+    return {"symbol": sym, "venue_symbol": vsym, "book": book,
+            "metrics": _ob.metrics(book, notional)}
 
 
 @app.get("/api/l2/report")
