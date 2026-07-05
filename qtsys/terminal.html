@@ -1878,7 +1878,7 @@ function vAudit(){
   const stratSel=`<select id="fltStrat" class="asel">${opt("",S.auditStrat,"all strategies")}${(A.strategies||[]).map(s=>opt(s,S.auditStrat)).join("")}</select>`;
   const assetSel=`<select id="fltAsset" class="asel">${opt("",S.auditAsset,"all instruments")}${(A.universe||[]).map(s=>opt(s,S.auditAsset)).join("")}</select>`;
   const grid=rows.length?rows.map(r=>`<tr class="rowlink" data-sym="${esc(r.asset)}">
-    <td><span class="sym">${esc(r.strategy)}</span><br><span class="mut" style="font-size:10px">${esc(r.family||"")}</span></td>
+    <td><span class="sym" data-authesis="${esc(r.strategy)}" style="cursor:pointer;border-bottom:1px dotted var(--amber)" title="open strategy thesis">${esc(r.strategy)}</span><br><span class="mut" style="font-size:10px">${esc(r.family||"")}</span></td>
     <td><span class="sym">${esc(r.asset)}</span></td>
     <td class="num">${r.n??"—"}</td><td class="num">${fp(r.win_rate)}</td>
     <td class="num ${(r.expectancy||0)>=0?"up":"dn"}">${fp(r.expectancy)}</td>
@@ -1901,7 +1901,7 @@ function vAudit(){
   <div class="panel"><div class="ph">Strategy Engineer · what it analysed, per instrument
     <span class="right mut">${rows.length} of ${(A.results||[]).length} pairs · sweep ${asof}</span></div>
     <div class="pb" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">${stratSel}${assetSel}
-      <span class="mut" style="font-size:10.5px">click a row to open the instrument · sorted by out-of-sample expectancy</span></div>
+      <span class="mut" style="font-size:10.5px">click the <b>strategy</b> for its thesis · the rest of the <b>row</b> to open the instrument · sorted by out-of-sample expectancy</span></div>
     <div style="overflow-x:auto;max-height:52vh"><table><thead><tr><th>Strategy</th><th>Instrument</th><th>Trades</th>
       <th>Win rate</th><th>Expect./trade</th><th>PF</th><th>DSR gate</th></tr></thead><tbody>${grid}</tbody></table></div>
     <div class="note">Each row is one backtest the Strategy Engineer ran: a strategy (with its parameters, encoded in the id) on one instrument, and the real out-of-sample outcome. The DSR column is the strategy's overall reliability verdict (green ≥0.95, amber 0.80–0.95, red rejected). These are last-sweep results — re-run <code>python -m qtsys.sweep</code> to refresh.</div></div>
@@ -2105,6 +2105,12 @@ function normSym(s){if(!s)return null;s=s.toUpperCase();
 
 /* ============================================================ boot */
 document.addEventListener("click",e=>{
+  const ath=e.target.closest("[data-authesis]");
+  if(ath){e.stopPropagation();const id=ath.dataset.authesis;
+    const known=((S.strategies||{}).rows||[]).some(r=>r.id===id);
+    if(known){S.stratOpen=id;nav("strats")}
+    else toast("‘"+id+"’ is a swept candidate — it never cleared the DSR gate, so there is no promoted thesis (see STRAT for verified strategies)","");
+    return}
   const symEl=e.target.closest("[data-sym]");
   if(symEl){e.stopPropagation();const sy=symEl.dataset.sym;if(!sy)return;
     S.tf=380;S.ticket={side:"buy",type:"market"};
