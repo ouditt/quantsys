@@ -31,6 +31,7 @@ ROSTER = [
     ("Report Writer",     "P&L attribution and the daily wrap",             120),
     ("Microstructure Analyst", "crypto L2 depth sampling + weekly benefit A/B", 45),
     ("Fundamental Analyst", "valuation/growth/quality read on the book + watchlist", 180),
+    ("Arb Strategist", "pairs stat-arb scan + crypto triangular loop monitor", 90),
 ]
 
 # bundled non-equity symbols (commodity/FX/crypto/index) — no SEC CIK, so they
@@ -141,6 +142,8 @@ class AgentDaemon:
                 return self._filings_watch()
             if agent.name == "Fundamental Analyst" and self._due("fund_brief", 24):
                 return self._fundamental_brief()
+            if agent.name == "Arb Strategist" and self._due("arb_brief", 24):
+                return self._arb_brief()
             if agent.name == "Microstructure Analyst" and self.l2lab:
                 # 180-day one-shot upgrade decision (date-gated + one-shot inside lab)
                 if self.l2lab.upgrade_due():
@@ -347,6 +350,114 @@ class AgentDaemon:
                 f"{', '.join(s for s, _ in ranked[:3])}; "
                 f"richest {ranked[-1][0]}")
 
+    # --------------------------------------------------------- arb strategy
+    _ARB_SYMS = ("WTI", "BRENT", "NATGAS", "BTC", "ETH",
+                 "EURUSD", "GBPUSD", "AUDUSD", "CADUSD", "CHFUSD")
+
+    def _arb_brief(self) -> str:
+        """Deep task (24h): Engle-Granger pairs scan over the bundled real
+        daily history + OOS backtests on the cointegrated survivors, the
+        current triangular-loop read, and the CIP snapshot. Filed to the
+        Briefing Center. All PROPOSALS — the gateway owns execution."""
+        from .arb import cip, pairs, triangular
+        from .data import load_real
+        px = {}
+        for s in self._ARB_SYMS:
+            try:
+                px[s] = load_real(s)["close"].to_numpy()[-1500:]
+            except Exception:
+                continue
+        res = pairs.find_pairs(px)
+        co = [r for r in res if r["cointegrated"]]
+        L = [f"ARB BRIEF — pairs scan over {len(px)} instruments "
+             f"({len(res)} pairs tested, {len(co)} cointegrated at EG 5%)", "",
+             "COINTEGRATED (most mean-reverting first; verify the ECONOMIC "
+             "link — statistical passes without one are how spurious pairs "
+             "burn accounts):"]
+        for r in co[:6]:
+            L.append(f"  {r['y']:7s}~{r['x']:7s} ADF {r['adf']:+.2f}  "
+                     f"β {r['beta']:+.3f}  half-life {r['half_life']}d")
+        L.append("")
+        L.append("OUT-OF-SAMPLE BACKTESTS (params fit on train only, 4-leg fees):")
+        for r in co[:3]:
+            bt = pairs.backtest(px[r["y"]], px[r["x"]])
+            if bt.get("n_trades"):
+                L.append(f"  {r['y']}~{r['x']}: {bt['n_trades']} trades, "
+                         f"wr {bt['win_rate']:.0%}, total {bt['total_ret_pct']}% "
+                         f"of spread notional, worst {bt['worst_pct']}%")
+            else:
+                L.append(f"  {r['y']}~{r['x']}: {bt.get('note', 'no result')}")
+        ob = self.context.get("orderbook")
+        if ob:
+            L += ["", "TRIANGULAR LOOPS (live L2-walked, net of taker fees):"]
+            for tri in triangular.TRIANGLES:
+                try:
+                    t = triangular.loop_edge(lambda p: ob(p, 20), tri, 1000)
+                    if "error" in t:
+                        continue
+                    L.append(f"  {tri}: fwd {t['fwd']['edge_bps']:+.1f}bps / "
+                             f"rev {t['rev']['edge_bps']:+.1f}bps -> "
+                             f"{'SIGNAL' if t['signal'] else 'no edge (normal)'}")
+                except Exception:
+                    continue
+        q = self.context.get("quotes", {})
+        spots = {p: (q.get(p) or {}).get("last") for p in ("EURUSD", "GBPUSD")}
+        try:
+            from .intel import _fred_latest
+            rows = cip.snapshot(_fred_latest, {k: v for k, v in spots.items() if v})
+            if rows:
+                L += ["", "CIP (theoretical 3M forwards from FRED — analysis "
+                      "only, no forward market on this venue):"]
+                for r in rows:
+                    L.append(f"  {r['pair']}: spot {r['spot']:.4f} -> fwd "
+                             f"{r['fwd']} ({r['points']:+.1f}pts, carry "
+                             f"{r['carry_bps_ann']:+.0f}bps ann)")
+        except Exception:
+            pass
+        txt = "\n".join(L)
+        if self.llm_fn:
+            try:
+                syn = self.llm_fn(
+                    "You are the desk's Arb Strategist. In 3 tight bullets: "
+                    "which pair (if any) deserves paper capital and why, what "
+                    "invalidates it, and one thing the statistics may be "
+                    f"hiding. Be specific.\n\n{txt}")
+                txt += "\n\nSTRATEGIST SYNTHESIS:\n" + syn.strip()
+            except Exception:
+                pass
+        self._save_report("arb_brief", txt)
+        top = co[0] if co else None
+        return ("ARB BRIEF filed -> reports/; " +
+                (f"top pair {top['y']}~{top['x']} (ADF {top['adf']}, "
+                 f"hl {top['half_life']}d)" if top else "no cointegrated pairs") +
+                "; triangular loops inside fees (normal)")
+
+    def _tri_watch(self) -> str:
+        """Routine cycle: walk both crypto triangles on live L2; propose loudly
+        the moment a loop nets positive after fees — otherwise a quiet read."""
+        from .arb import triangular
+        ob = self.context.get("orderbook")
+        if not ob:
+            return "triangular watch idle: no order-book source wired"
+        reads = []
+        for tri in triangular.TRIANGLES:
+            try:
+                t = triangular.loop_edge(lambda p: ob(p, 20), tri, 1000)
+            except Exception:
+                continue
+            if "error" in t:
+                continue
+            if t["signal"]:
+                self.log("Arb Strategist",
+                         f"⚠ TRIANGULAR SIGNAL {tri}: {t['best']['path']} nets "
+                         f"{t['best']['edge_bps']:+.1f}bps on $1k after fees — "
+                         "PROPOSAL only, gateway owns execution", "warn")
+            best = max(t["fwd"]["edge_bps"], t["rev"]["edge_bps"])
+            reads.append(f"{tri} {best:+.0f}bps")
+        return ("triangular loops: " + ", ".join(reads) +
+                " (net of fees; negative = no arb, the normal state)"
+                if reads else "triangular watch: books unavailable")
+
     def _save_report(self, name: str, text: str) -> None:
         import os, time as _t
         d = os.path.join(os.path.dirname(__file__), "reports")
@@ -409,6 +520,8 @@ class AgentDaemon:
                                f"context: {b}")
                 except Exception:
                     pass
+        elif agent.name == "Arb Strategist":
+            msg = self._tri_watch()
         elif agent.name == "Microstructure Analyst":
             if not self.l2lab:
                 msg = "crypto L2 feed not wired — experiment idle"
@@ -421,6 +534,8 @@ class AgentDaemon:
             msg = "gate idle: no new candidates above DSR 0.95 this cycle"
         else:
             msg = "cycle complete; nothing actionable — remaining on standby"
+        if agent.name in ("Arb Strategist", "Microstructure Analyst"):
+            return msg                        # quantitative reads stay verbatim
         if self.llm_fn:                       # optional richer write-up
             try:
                 msg = self.llm_fn(f"You are the {agent.name}. Data: {msg}. "
