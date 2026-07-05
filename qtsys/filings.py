@@ -176,12 +176,13 @@ def summary(sym: str, llm_fn=None, forms=("10-K", "10-Q", "8-K")) -> dict:
     txt = filing_text(latest["url"], max_chars=24000)
     if not txt:
         return {**base, "summary": ""}
-    prompt = (
-        f"You are an equity analyst. Summarise this SEC {latest['form']} filing "
-        f"for {sym} (filed {latest['date']}) in 4-6 tight bullet points a "
-        f"portfolio manager can act on: material changes, guidance, risks, and "
-        f"anything that moves the thesis. Be specific with numbers. No preamble.\n\n"
-        f"{txt}")
+    from .llm import guard
+    prompt = guard(
+        f"You are an equity analyst. Summarise the SEC {latest['form']} filing "
+        f"for {sym} (filed {latest['date']}) in the data block, in 4-6 tight "
+        "bullet points a portfolio manager can act on: material changes, "
+        "guidance, risks, anything that moves the thesis. Be specific with "
+        "numbers. No preamble.", txt)
     try:
         out = llm_fn(prompt).strip()
     except Exception:

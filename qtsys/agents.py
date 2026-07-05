@@ -336,12 +336,13 @@ class AgentDaemon:
         txt = "\n".join(L)
         if self.llm_fn:
             try:
-                syn = self.llm_fn(
-                    "You are the desk's Fundamental Analyst. Given this "
-                    "cross-sectional read, write 4 tight bullets: which names "
-                    "the fundamentals favour, which to avoid, one risk the "
-                    "composite may be hiding, and what to verify next. Be "
-                    f"specific.\n\n{txt}")
+                from .llm import guard
+                syn = self.llm_fn(guard(
+                    "You are the desk's Fundamental Analyst. Given the "
+                    "cross-sectional read in the data block, write 4 tight "
+                    "bullets: which names the fundamentals favour, which to "
+                    "avoid, one risk the composite may be hiding, and what to "
+                    "verify next. Be specific.", txt))
                 txt += "\n\nANALYST SYNTHESIS:\n" + syn.strip()
             except Exception:
                 pass
@@ -423,11 +424,12 @@ class AgentDaemon:
         txt = "\n".join(L)
         if self.llm_fn:
             try:
-                syn = self.llm_fn(
-                    "You are the desk's Arb Strategist. In 3 tight bullets: "
-                    "which pair (if any) deserves paper capital and why, what "
-                    "invalidates it, and one thing the statistics may be "
-                    f"hiding. Be specific.\n\n{txt}")
+                from .llm import guard
+                syn = self.llm_fn(guard(
+                    "You are the desk's Arb Strategist. From the scan in the "
+                    "data block, in 3 tight bullets: which pair (if any) "
+                    "deserves paper capital and why, what invalidates it, and "
+                    "one thing the statistics may be hiding. Be specific.", txt))
                 txt += "\n\nSTRATEGIST SYNTHESIS:\n" + syn.strip()
             except Exception:
                 pass
@@ -544,8 +546,10 @@ class AgentDaemon:
             return msg                        # quantitative reads stay verbatim
         if self.llm_fn:                       # optional richer write-up
             try:
-                msg = self.llm_fn(f"You are the {agent.name}. Data: {msg}. "
-                                  "Write a two-sentence desk note.")
+                from .llm import guard
+                msg = self.llm_fn(guard(
+                    f"You are the {agent.name}. Write a two-sentence desk "
+                    "note from the data block.", msg))
             except Exception:
                 pass
         return msg

@@ -525,7 +525,8 @@ document.addEventListener("click",e=>{
   const b=e.target.closest("#pseg button");
   if(b)applyPosture(b.dataset.p,true);
 });
-async function j(url,opt){const r=await fetch(API+url,opt);if(!r.ok)throw await r.json().catch(()=>({detail:r.status}));return r.json()}
+async function j(url,opt){opt=opt||{};opt.headers=Object.assign({"X-QTSYS-Token":window.QTSYS_TOKEN||""},opt.headers||{});
+  const r=await fetch(API+url,opt);if(!r.ok)throw await r.json().catch(()=>({detail:r.status}));return r.json()}
 async function tryLive(){
   try{const ctl=new AbortController();setTimeout(()=>ctl.abort(),900);
     const h=await fetch(API+"/api/health",{signal:ctl.signal}).then(r=>r.json());
@@ -874,8 +875,14 @@ async function killSwitch(){
   });
 }
 async function resumeTrading(){
-  confirmBox("Resume trading","Re-enables order flow after a halt.","RESUME",async()=>{
-    if(S.mode==="live"){try{await j("/api/resume",{method:"POST"});await liveRefresh()}catch(e){}}
+  confirmBox("Resume trading","Re-enables order flow after a halt. Per the limit protocol a written cause is required and goes to the permanent log.","RESUME",async()=>{
+    if(S.mode==="live"){
+      const reason=(prompt("Written cause for resuming (required, ≥5 chars):")||"").trim();
+      if(reason.length<5){toast("resume needs a written cause","err");return}
+      try{await j("/api/resume",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({confirm:"RESUME",reason})});await liveRefresh()}
+      catch(e){toast(e.detail||"resume rejected","err");return}
+    }
     else{S.halted=false;alog("system","trading resumed (manual)")}
     toast("Trading resumed","ok");render();
   });

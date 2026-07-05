@@ -68,11 +68,13 @@ def narrative(symbol: str, headlines: list[str], llm_fn) -> str:
     """One LLM call: the dominant narrative + key risk across the headlines."""
     if not llm_fn or not headlines:
         return ""
+    from .llm import guard
     joined = "\n".join(f"- {h}" for h in headlines[:15] if h)
-    prompt = (f"You are a markets analyst. Based ONLY on these recent {symbol} "
-              "headlines, write exactly two sentences: (1) the dominant "
-              "sentiment/narrative, (2) the key risk or counterpoint. Be concise "
-              f"and specific; do not add disclaimers.\n\n{joined}")
+    prompt = guard(
+        f"You are a markets analyst. Based ONLY on the recent {symbol} "
+        "headlines in the data block, write exactly two sentences: (1) the "
+        "dominant sentiment/narrative, (2) the key risk or counterpoint. "
+        "Be concise and specific; do not add disclaimers.", joined)
     try:
         return " ".join(llm_fn(prompt).split()).strip()[:400]
     except Exception:

@@ -59,10 +59,31 @@ VENUE_SYMBOLS = {
 POSTURE_SCALE = {"SURVIVAL": 0.5, "BALANCED": 1.0, "AGGRESSIVE": 1.5}
 
 app = FastAPI(title="qtsys terminal API")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
-                   allow_headers=["*"])
+# NO CORS middleware on purpose: the terminal is served same-origin by this
+# process, so cross-origin pages get no readable responses. Combined with the
+# session token below, a malicious website on this machine can neither read
+# the API nor fire mutations (the localhost-CSRF hole this closes).
 
 state: dict = {}
+
+import secrets as _secrets
+
+SESSION_TOKEN = _secrets.token_hex(16)
+
+
+@app.middleware("http")
+async def _auth_mutations(request, call_next):
+    """Every mutating /api call must carry the per-boot session token. The
+    token is injected into the served page only, so same-origin JS has it and
+    cross-origin pages cannot obtain or send it. GETs stay open (read-only,
+    unreadable cross-origin without CORS; keeps /api/data usable from
+    pandas/Excel)."""
+    if (request.method in ("POST", "DELETE", "PUT", "PATCH")
+            and request.url.path.startswith("/api")
+            and request.headers.get("x-qtsys-token") != SESSION_TOKEN):
+        return JSONResponse({"detail": "missing/invalid session token — "
+                             "reload the terminal page"}, status_code=401)
+    return await call_next(request)
 
 
 def _equity(broker) -> float:
@@ -1007,7 +1028,17 @@ def kill():
 
 
 @app.post("/api/resume")
-def resume(): state["gw"].resume(); return {"halted": False}
+def resume(body: dict):
+    """Resuming after a halt follows the limit protocol: it requires a typed
+    confirmation and a WRITTEN cause, which goes to the permanent agent log."""
+    if (body or {}).get("confirm") != "RESUME":
+        raise HTTPException(400, "type RESUME to confirm")
+    reason = ((body or {}).get("reason") or "").strip()
+    if len(reason) < 5:
+        raise HTTPException(400, "a written cause is required to resume")
+    state["gw"].resume()
+    state["daemon"].log("system", f"TRADING RESUMED — operator cause: {reason}")
+    return {"halted": False}
 
 
 @app.get("/api/posture")
@@ -1399,7 +1430,13 @@ def fills(): return _fills(state["broker"])[::-1][:50]
 
 
 @app.get("/")
-def index(): return FileResponse(os.path.join(HERE, "terminal.html"))
+def index():
+    from fastapi.responses import HTMLResponse
+    with open(os.path.join(HERE, "terminal.html")) as f:
+        html = f.read()
+    # same-origin token hand-off (see _auth_mutations)
+    inj = f"<script>window.QTSYS_TOKEN={SESSION_TOKEN!r};</script>"
+    return HTMLResponse(html.replace("<head>", "<head>" + inj, 1))
 
 
 if __name__ == "__main__":
