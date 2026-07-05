@@ -29,6 +29,7 @@ ROSTER = [
     ("Risk Officer",      "exposure/CVaR watch, throttle & kill proximity",  30),
     ("Ops Triage",        "data freshness, feed heartbeats, reconciliation", 20),
     ("Report Writer",     "P&L attribution and the daily wrap",             120),
+    ("Microstructure Analyst", "crypto L2 depth sampling + weekly benefit A/B", 45),
 ]
 
 # bundled non-equity symbols (commodity/FX/crypto/index) — no SEC CIK, so they
@@ -62,6 +63,7 @@ class AgentDaemon:
                        for n, r, i in ROSTER}
         self._tasks: list[asyncio.Task] = []
         self.llm_fn: Callable[[str], str] | None = None   # optional Claude hook
+        self.l2lab = None                                 # crypto-L2 experiment (set by server)
 
     # ------------------------------------------------------------- persistence
     def _load_state(self, name: str, default: bool) -> bool:
@@ -136,6 +138,19 @@ class AgentDaemon:
                 return "MORNING BRIEFING filed -> reports/; top setups: " +                        ("; ".join(t.strip() for t in top) if top else "none fresh")
             if agent.name == "Research Analyst" and self._due("filings_watch", 12):
                 return self._filings_watch()
+            if agent.name == "Microstructure Analyst" and self.l2lab:
+                # 180-day one-shot upgrade decision (date-gated + one-shot inside lab)
+                if self.l2lab.upgrade_due():
+                    txt = self.l2lab.upgrade_reminder()
+                    self._save_report("l2_upgrade_decision", txt)
+                    return ("⚠ L2/SIP 180-DAY DECISION filed -> reports/ — action "
+                            "requested: implement paid equity data + SIP? (see report)")
+                if self._due("l2_benefit", 168):        # weekly A/B benefit report
+                    txt = self.l2lab.weekly_report()
+                    self._save_report("l2_benefit", txt)
+                    head = next((l for l in txt.splitlines() if l.startswith("VERDICT")),
+                                "weekly crypto-L2 benefit filed")
+                    return f"CRYPTO L2 BENEFIT filed -> reports/; {head}"
             if agent.name == "Risk Officer" and self._due("risk_report", 24):
                 from .portfolio_risk import report
                 w = self.context.get("weights", lambda: None)() or None
@@ -292,6 +307,14 @@ class AgentDaemon:
         elif agent.name == "Report Writer" and acct:
             msg = (f"wrap: equity {acct.get('equity', 0):,.0f}, "
                    f"total P&L {acct.get('total_pnl', 0):+,.0f}")
+        elif agent.name == "Microstructure Analyst":
+            if not self.l2lab:
+                msg = "crypto L2 feed not wired — experiment idle"
+            else:
+                n = self.l2lab.snapshot()
+                d = self.l2lab.days_active()
+                msg = (f"sampled {n} crypto L2 book(s); depth+imbalance recorded "
+                       f"(day {d:.0f}/180 of the free-L2 benefit trial)")
         elif agent.name == "Validation Officer":
             msg = "gate idle: no new candidates above DSR 0.95 this cycle"
         else:

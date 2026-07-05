@@ -344,6 +344,26 @@ class AlpacaBroker(Broker):
                 self._req["last"](symbol_or_symbols=symbol))
         return float(t[symbol].price)
 
+    def crypto_orderbook(self, symbol: str, depth: int = 20) -> dict:
+        """Live L2 depth-of-book for a crypto pair (free on Alpaca). Returns
+        {'bids': [(price, size), ...], 'asks': [...], 'ts': iso}. Empty on error
+        or for non-crypto symbols."""
+        if "/" not in symbol:
+            return {"bids": [], "asks": [], "ts": None}
+        try:
+            from alpaca.data.requests import CryptoLatestOrderbookRequest
+            r = self.dc.get_crypto_latest_orderbook(
+                CryptoLatestOrderbookRequest(symbol_or_symbols=symbol))
+            ob = r[symbol]
+            ts = getattr(ob, "timestamp", None)
+            return {
+                "bids": [(float(b.price), float(b.size)) for b in ob.bids[:depth]],
+                "asks": [(float(a.price), float(a.size)) for a in ob.asks[:depth]],
+                "ts": ts.isoformat() if ts else None,
+            }
+        except Exception:
+            return {"bids": [], "asks": [], "ts": None}
+
     def option_chain(self, underlying: str, n_exp: int = 6,
                      strike_pct: float = 0.35) -> list[dict]:
         """Live option chain for an underlying: nearest `n_exp` expirations,

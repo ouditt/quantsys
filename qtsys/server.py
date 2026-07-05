@@ -165,6 +165,15 @@ async def boot() -> None:
     from . import filings as _filings         # SEC EDGAR primary disclosure
     daemon.context["filings"] = lambda s: _filings.filings(s, forms=_filings.MATERIAL_FORMS)
     daemon.context["filing_summary"] = lambda s: _filings.summary(s, daemon.llm_fn)
+    if hasattr(broker, "crypto_orderbook"):   # free crypto L2 + benefit experiment
+        daemon.context["orderbook"] = broker.crypto_orderbook
+        try:
+            from .l2lab import L2Lab
+            daemon.l2lab = L2Lab(os.path.join(HERE, "l2lab.db"), broker.crypto_orderbook)
+            daemon.log("__system__", "crypto L2 benefit experiment armed "
+                       "(Microstructure Analyst)")
+        except Exception as e:
+            daemon.log("__system__", f"L2 lab init failed: {e}", "error")
     state.update(broker=broker, gw=gw, hist=hist, daemon=daemon,
                  venue=venue, vmap=VENUE_SYMBOLS.get(venue),
                  meta={s: (n, c) for s, n, c, _ in UNIVERSE})
@@ -779,6 +788,27 @@ async def quote_one(sym: str):
             pass
     q = state["daemon"].context["quotes"].get(sym, {})
     return {"symbol": sym, "last": q.get("last"), "asof": q.get("asof", "")}
+
+
+@app.get("/api/orderbook")
+async def orderbook_api(sym: str, notional: float = 5000.0):
+    """Live L2 depth-of-book + microstructure metrics for a crypto pair (free)."""
+    broker = state["broker"]
+    if not hasattr(broker, "crypto_orderbook") or "/" not in sym:
+        raise HTTPException(400, "crypto L2 order book is available for crypto pairs only")
+    book = await asyncio.to_thread(broker.crypto_orderbook, sym, 20)
+    from . import orderbook as _ob
+    return {"symbol": sym, "book": book, "metrics": _ob.metrics(book, notional)}
+
+
+@app.get("/api/l2/report")
+async def l2_report():
+    """The crypto-L2 benefit A/B report the Microstructure Analyst files weekly."""
+    lab = getattr(state.get("daemon"), "l2lab", None)
+    if not lab:
+        return {"text": "crypto L2 experiment not active", "days": 0}
+    return {"text": await asyncio.to_thread(lab.weekly_report),
+            "days": lab.days_active()}
 
 
 @app.get("/api/resolve")
