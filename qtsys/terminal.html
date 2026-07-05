@@ -2106,8 +2106,11 @@ function normSym(s){if(!s)return null;s=s.toUpperCase();
 /* ============================================================ boot */
 document.addEventListener("click",e=>{
   const symEl=e.target.closest("[data-sym]");
-  if(symEl){e.stopPropagation();S.tf=380;S.ticket={side:"buy",type:"market"};
-    nav("security",symEl.dataset.sym);return}
+  if(symEl){e.stopPropagation();const sy=symEl.dataset.sym;if(!sy)return;
+    S.tf=380;S.ticket={side:"buy",type:"market"};
+    // seeded (live universe) -> open directly; off-universe (e.g. audit/scan
+    // results across thousands of symbols) -> resolve first so it can render
+    if(S.quotes[sy])nav("security",sy);else resolveSym(sy);return}
   const ind=e.target.closest("[data-industry]");
   if(ind){loadIndustry(ind.dataset.industry);return}
   const opt=e.target.closest("[data-options]");
