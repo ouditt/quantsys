@@ -1159,16 +1159,32 @@ function vOptions(){
     ${side(r.call)}
     <td class="num" style="font-weight:700;background:var(--bg1)" data-resolve="${esc((r.call||r.put||{}).symbol||"")}">${nn(r.strike)}</td>
     ${side(r.put)}</tr>`).join("");
+  const sf=d.surface||[];
+  const cur=sf.find(x=>x.exp===d.expiration);
+  const sfRow=sf.length?`<div class="panel"><div class="ph">Vol surface · term structure
+      <span class="right mut">arb-free SVI fit · American-exercise IV · quality-gated quotes</span></div>
+    <table><thead><tr><th>Expiry</th><th>Fwd</th><th>Carry q</th><th>ATM vol</th><th>25Δ RR</th><th>25Δ fly</th><th>Fit pts</th><th>RMSE</th><th>No-arb</th></tr></thead><tbody>
+    ${sf.map(x=>`<tr class="${x.exp===d.expiration?"atm":""}" style="cursor:pointer" data-optexp="${x.exp}">
+      <td>${x.exp.slice(5)}</td><td class="num">${nn(x.F)}</td><td class="num">${x.q_implied==null?"—":(x.q_implied*100).toFixed(2)+"%"}</td>
+      <td class="num" style="font-weight:700">${iv(x.atm_vol)}</td>
+      <td class="num ${x.rr25<0?"dn":"up"}">${x.rr25==null?"—":(x.rr25*100).toFixed(2)}</td>
+      <td class="num">${x.fly25==null?"—":(x.fly25*100).toFixed(2)}</td>
+      <td class="num mut">${x.n_fit}</td><td class="num mut">${x.fit_rmse_vol==null?"—":(x.fit_rmse_vol*100).toFixed(2)}</td>
+      <td>${x.butterfly_ok?'<span class="pill up">clean</span>':'<span class="pill dn">arb?</span>'}</td></tr>`).join("")}
+    </tbody></table>
+    <div class="note">Negative 25Δ RR = put skew (downside insurance bid). Fly = smile curvature. RMSE in vol points — how tight the SVI fit is to gated quotes.</div></div>`:"";
   return `${back}
   <div id="sec-head"><h1>Options · ${esc(d.underlying)}</h1>
     <span class="chip">spot ${nn(spot)}</span><span class="chip">r ${(d.r*100).toFixed(2)}%</span>
+    ${cur?`<span class="chip">ATM ${iv(cur.atm_vol)}</span><span class="chip ${cur.rr25<0?"dn":"up"}">RR25 ${cur.rr25==null?"—":(cur.rr25*100).toFixed(2)}</span>`:""}
     <span class="chip" data-sym="${esc(d.underlying)}" style="cursor:pointer">chart ↗</span></div>
+  ${sfRow}
   <div class="panel"><div class="ph">Chain <span class="right">${expSeg}</span></div>
     <div style="overflow-x:auto;max-height:60vh"><table class="opt"><thead>
       <tr><th colspan="6" style="text-align:center;color:var(--up)">CALLS</th><th>Strike</th><th colspan="6" style="text-align:center;color:var(--dn)">PUTS</th></tr>
       <tr><th>Bid</th><th>Ask</th><th>Last</th><th>IV</th><th>Δ</th><th>OI</th><th></th><th>Bid</th><th>Ask</th><th>Last</th><th>IV</th><th>Δ</th><th>OI</th></tr>
     </thead><tbody>${rows}</tbody></table></div>
-    <div class="note">Live chain from Alpaca; IV & Greeks (Δ shown) computed via Black-Scholes. Click a strike to open that contract. <b>Vol surface, skew/term-structure, no-arbitrage fitting and American-exercise IV are the analytics core coming from Fable 5</b> — this is the ready harness.</div></div>`;
+    <div class="note">Live Alpaca chain. IV is read from the <b>no-arbitrage SVI surface</b> (fitted to quality-gated OTM quotes via American-binomial inversion with the parity-implied carry) — deep-ITM strikes price cleanly where a raw mid inversion is ill-posed. Greeks off surface vol. Click a strike to open that contract.</div></div>`;
 }
 async function loadFund(s){
   if(S.mode!=="live"||S.fund[s]!==undefined||S._floading.has(s))return;

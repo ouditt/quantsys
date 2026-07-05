@@ -683,7 +683,12 @@ def _build_chain(broker, sym, exp) -> dict:
             r = float(v) / 100.0
     except Exception:
         pass
-    enriched = options.enrich_chain(contracts, spot or 0.0, r)
+    try:                                        # analytics core: arb-free surface
+        from . import volsurface
+        res = volsurface.build(contracts, spot or 0.0, r)
+        enriched, surface = res["contracts"], res["surface"]
+    except Exception:
+        enriched, surface = options.enrich_chain(contracts, spot or 0.0, r), []
     exps = sorted({c["expiration"] for c in enriched})
     pick = exp if exp in exps else (exps[0] if exps else "")
     byk: dict = {}
@@ -691,12 +696,12 @@ def _build_chain(broker, sym, exp) -> dict:
         if c["expiration"] != pick:
             continue
         row = byk.setdefault(c["strike"], {"strike": c["strike"], "call": None, "put": None})
-        row[c["type"]] = {k: c[k] for k in ("symbol", "bid", "ask", "last", "mid",
-                                            "open_interest", "iv", "delta", "gamma",
-                                            "theta", "vega")}
+        row[c["type"]] = {k: c.get(k) for k in ("symbol", "bid", "ask", "last", "mid",
+                                                "open_interest", "iv", "delta", "gamma",
+                                                "theta", "vega", "gate_ok")}
     chain = [byk[k] for k in sorted(byk)]
     return {"underlying": sym, "spot": spot, "r": r, "expiration": pick,
-            "expirations": exps, "chain": chain}
+            "expirations": exps, "chain": chain, "surface": surface}
 
 
 @app.get("/api/industry")

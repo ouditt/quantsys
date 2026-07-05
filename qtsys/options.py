@@ -115,17 +115,18 @@ def enrich_chain(contracts: list[dict], spot: float, r: float = 0.04,
                  q: float = 0.0) -> list[dict]:
     """Add implied vol + Greeks to a live chain (from broker.option_chain).
 
-    OPUS SHELL glue: prices each contract off its mid using the existing
-    Black-Scholes IV/greeks math above — sound and immediately useful.
-
-    FABLE 5 TODO (the analytics core to refine here):
-      - fit/interpolate a no-arbitrage vol SURFACE (SVI or arb-free spline) per
-        expiry rather than per-contract Newton IV; smooth the wings
-      - use american_binomial for early-exercise-aware IV on American equity
-        options (BS IV mis-states deep ITM near dividends)
-      - quality-gate on spread width / 0-bid / stale quotes; build the term
-        structure; expose skew, 25d risk-reversal, butterfly
-    """
+    Delegates to the volsurface analytics core (quality-gated, parity-forward,
+    American-IV, arb-free SVI surface) and falls back to the original
+    per-contract Newton-off-mid path only if the surface build fails.
+    Prefer volsurface.build() directly when you also want the per-expiry
+    surface metrics (ATM term structure, 25Δ RR, fly)."""
+    try:
+        from .volsurface import build
+        res = build(contracts, spot, r)
+        if res.get("surface"):
+            return res["contracts"]
+    except Exception:
+        pass
     import datetime
     today = datetime.date.today()
     out = []
