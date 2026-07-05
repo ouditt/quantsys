@@ -31,6 +31,11 @@ ROSTER = [
     ("Report Writer",     "P&L attribution and the daily wrap",             120),
 ]
 
+# bundled non-equity symbols (commodity/FX/crypto/index) — no SEC CIK, so they
+# are skipped by the filings watch even though they look like alpha tickers.
+_NON_EQUITY = {"WTI", "BRENT", "NATGAS", "BTC", "ETH", "EURUSD", "GBPUSD",
+               "AUDUSD", "JPYUSD", "CHFUSD", "CADUSD", "VIX", "GOLD", "SPX"}
+
 
 @dataclass
 class Agent:
@@ -129,6 +134,8 @@ class AgentDaemon:
                 self._save_report("morning_briefing", txt)
                 top = [l for l in txt.splitlines() if l.strip().startswith("[")][:3]
                 return "MORNING BRIEFING filed -> reports/; top setups: " +                        ("; ".join(t.strip() for t in top) if top else "none fresh")
+            if agent.name == "Research Analyst" and self._due("filings_watch", 12):
+                return self._filings_watch()
             if agent.name == "Risk Officer" and self._due("risk_report", 24):
                 from .portfolio_risk import report
                 w = self.context.get("weights", lambda: None)() or None
@@ -179,6 +186,65 @@ class AgentDaemon:
             return f"deep task error ({type(e).__name__}): {e}"
         return None
 
+    def _filings_watchlist(self, cap: int = 16) -> list[str]:
+        """Equity tickers to monitor for fresh SEC filings: any held/tracked
+        equities (from live quotes) plus the mega-cap sector constituents."""
+        out: list[str] = []
+        q = self.context.get("quotes", {}) or {}
+        # held/tracked names that look like US equity tickers (have a CIK path)
+        for s in q:
+            if s.isalpha() and 1 <= len(s) <= 5 and s not in _NON_EQUITY:
+                out.append(s)
+        try:
+            from .sectors import CONSTITUENTS
+            for names in CONSTITUENTS.values():
+                out.extend(names[:2])
+        except Exception:
+            pass
+        seen, uniq = set(), []
+        for s in out:
+            if s not in seen:
+                seen.add(s)
+                uniq.append(s)
+        return uniq[:cap]
+
+    def _filings_watch(self) -> str:
+        """Deep task: scan the watchlist for material SEC filings in the last few
+        days, LLM-summarise the most recent, and file a report (Briefing Center)."""
+        fil = self.context.get("filings")
+        if not fil:
+            return "filings watch: no filings source wired"
+        import datetime
+        cutoff = str(datetime.date.today() - datetime.timedelta(days=4))
+        material = {"8-K", "10-Q", "10-K", "6-K", "20-F"}
+        recent = []
+        for s in self._filings_watchlist():
+            try:
+                for f in (fil(s) or [])[:6]:
+                    if f.get("date", "") >= cutoff and f.get("form", "").upper() in material:
+                        recent.append({**f, "sym": s})
+            except Exception:
+                continue
+        if not recent:
+            return "filings watch: no material filings in the last 4 days across the watchlist"
+        recent.sort(key=lambda x: x["date"], reverse=True)
+        top = recent[0]
+        summ = ""
+        fsum = self.context.get("filing_summary")
+        if fsum:
+            try:
+                summ = (fsum(top["sym"]) or {}).get("summary", "")
+            except Exception:
+                summ = ""
+        lines = [f"FILINGS WATCH — {len(recent)} material filings filed in the last 4 days:"]
+        for r in recent[:14]:
+            lines.append(f"  {r['date']}  {r['sym']:6s} {r['form']:6s} {r.get('title', '')[:44]}")
+        if summ:
+            lines += ["", f"Most recent — {top['sym']} {top['form']} ({top['date']}):", summ]
+        self._save_report("filings_watch", "\n".join(lines))
+        return (f"FILINGS WATCH filed -> reports/; {len(recent)} fresh material filings, "
+                f"latest {top['sym']} {top['form']} {top['date']}")
+
     def _save_report(self, name: str, text: str) -> None:
         import os, time as _t
         d = os.path.join(os.path.dirname(__file__), "reports")
@@ -204,6 +270,17 @@ class AgentDaemon:
                     b = fund(movers[0][0]).get("brief")
                     if b:
                         msg += f" | fundamentals — {b}"
+                except Exception:
+                    pass
+            fil = self.context.get("filings")          # flag a fresh SEC filing
+            if fil and movers and movers[0][0] not in _NON_EQUITY:
+                try:
+                    import datetime
+                    cut = str(datetime.date.today() - datetime.timedelta(days=3))
+                    fresh = next((f for f in (fil(movers[0][0]) or [])[:4]
+                                  if f.get("date", "") >= cut), None)
+                    if fresh:
+                        msg += f" | fresh SEC {fresh['form']} {fresh['date']} on {movers[0][0]}"
                 except Exception:
                     pass
         elif agent.name == "Risk Officer" and acct:
