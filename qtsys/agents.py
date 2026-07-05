@@ -30,6 +30,7 @@ ROSTER = [
     ("Ops Triage",        "data freshness, feed heartbeats, reconciliation", 20),
     ("Report Writer",     "P&L attribution and the daily wrap",             120),
     ("Microstructure Analyst", "crypto L2 depth sampling + weekly benefit A/B", 45),
+    ("Fundamental Analyst", "valuation/growth/quality read on the book + watchlist", 180),
 ]
 
 # bundled non-equity symbols (commodity/FX/crypto/index) — no SEC CIK, so they
@@ -138,6 +139,8 @@ class AgentDaemon:
                 return "MORNING BRIEFING filed -> reports/; top setups: " +                        ("; ".join(t.strip() for t in top) if top else "none fresh")
             if agent.name == "Research Analyst" and self._due("filings_watch", 12):
                 return self._filings_watch()
+            if agent.name == "Fundamental Analyst" and self._due("fund_brief", 24):
+                return self._fundamental_brief()
             if agent.name == "Microstructure Analyst" and self.l2lab:
                 # 180-day one-shot upgrade decision (date-gated + one-shot inside lab)
                 if self.l2lab.upgrade_due():
@@ -260,6 +263,90 @@ class AgentDaemon:
         return (f"FILINGS WATCH filed -> reports/; {len(recent)} fresh material filings, "
                 f"latest {top['sym']} {top['form']} {top['date']}")
 
+    # ------------------------------------------------- fundamental analysis
+    _FUND_COLS = (("forward_pe", "fPE", False), ("peg", "PEG", False),
+                  ("rev_growth_pct", "rev%", True),
+                  ("profit_margin_pct", "mgn%", True),
+                  ("debt_to_equity", "D/E", False),
+                  ("div_yield_pct", "dy%", True))
+
+    def _fundamental_brief(self) -> str:
+        """Deep task (24h): cross-sectional valuation/growth/quality read over
+        held equities + sector mega-caps. Ranks a composite of forward P/E,
+        PEG, revenue growth, margin and leverage (rank-based, so one crazy
+        outlier can't dominate), names the standouts both ways, LLM-writes the
+        synthesis, and files a fundamental_brief to the Briefing Center."""
+        fund = self.context.get("fundamentals")
+        if not fund:
+            return "fundamental brief: no fundamentals source wired"
+        rows = []
+        for s in self._filings_watchlist(cap=14):
+            try:
+                m = (fund(s) or {}).get("metrics", {}) or {}
+            except Exception:
+                continue
+            if m.get("forward_pe") or m.get("pe"):
+                rows.append((s, m))
+        if len(rows) < 4:
+            return "fundamental brief: too few equities with live metrics"
+
+        def _ranks(key, higher_better):
+            vals = [(s, m.get(key)) for s, m in rows]
+            have = sorted((v, s) for s, v in vals if isinstance(v, (int, float)))
+            if higher_better:
+                have = have[::-1]
+            pos = {s: i / max(len(have) - 1, 1) for i, (v, s) in enumerate(have)}
+            return {s: pos.get(s, 0.5) for s, _ in vals}     # missing -> neutral
+
+        parts = [_ranks(k, hb) for k, _, hb in self._FUND_COLS[:5]]
+        score = {s: sum(p[s] for p in parts) / len(parts) for s, _ in rows}
+        ranked = sorted(rows, key=lambda r: score[r[0]])     # low = attractive
+        q = self.context.get("quotes", {})
+
+        def line(s, m):
+            cells = []
+            for k, lbl, _ in self._FUND_COLS:
+                v = m.get(k)
+                cells.append(f"{lbl} {v:.1f}" if isinstance(v, (int, float))
+                             else f"{lbl} —")
+            tgt, last = m.get("target_mean"), (q.get(s) or {}).get("last")
+            up = (f" | tgt upside {(tgt / last - 1) * 100:+.0f}%"
+                  if isinstance(tgt, (int, float)) and last else "")
+            return f"  {s:6s} " + "  ".join(cells) + up
+
+        L = ["FUNDAMENTAL BRIEF — cross-sectional value/growth/quality "
+             f"(rank composite over {len(rows)} names)", "",
+             "MOST ATTRACTIVE (cheap growth, clean balance sheet first):"]
+        L += [line(s, m) for s, m in ranked[:4]]
+        L += ["", "RICHEST / MOST FRAGILE (priced for perfection or levered):"]
+        L += [line(s, m) for s, m in ranked[-3:]]
+        top = ranked[0][0]
+        fsum = self.context.get("filing_summary")
+        if fsum:
+            try:
+                fs = fsum(top) or {}
+                if fs.get("summary"):
+                    L += ["", f"LATEST FILING on top pick {top} "
+                          f"({fs.get('form')} {fs.get('date')}):", fs["summary"]]
+            except Exception:
+                pass
+        txt = "\n".join(L)
+        if self.llm_fn:
+            try:
+                syn = self.llm_fn(
+                    "You are the desk's Fundamental Analyst. Given this "
+                    "cross-sectional read, write 4 tight bullets: which names "
+                    "the fundamentals favour, which to avoid, one risk the "
+                    "composite may be hiding, and what to verify next. Be "
+                    f"specific.\n\n{txt}")
+                txt += "\n\nANALYST SYNTHESIS:\n" + syn.strip()
+            except Exception:
+                pass
+        self._save_report("fundamental_brief", txt)
+        return (f"FUNDAMENTAL BRIEF filed -> reports/; favours "
+                f"{', '.join(s for s, _ in ranked[:3])}; "
+                f"richest {ranked[-1][0]}")
+
     def _save_report(self, name: str, text: str) -> None:
         import os, time as _t
         d = os.path.join(os.path.dirname(__file__), "reports")
@@ -307,6 +394,21 @@ class AgentDaemon:
         elif agent.name == "Report Writer" and acct:
             msg = (f"wrap: equity {acct.get('equity', 0):,.0f}, "
                    f"total P&L {acct.get('total_pnl', 0):+,.0f}")
+        elif agent.name == "Fundamental Analyst" and q:
+            movers = [s for s, v in sorted(q.items(),
+                      key=lambda kv: abs(kv[1].get("chg_pct") or 0), reverse=True)
+                      if s not in _NON_EQUITY and s.isalpha()][:1]
+            msg = "watchlist steady; valuation ranks unchanged since the daily brief"
+            fund = self.context.get("fundamentals")
+            if movers and fund:
+                try:
+                    b = (fund(movers[0]) or {}).get("brief")
+                    ch = q[movers[0]].get("chg_pct")
+                    if b:
+                        msg = (f"{movers[0]} moving {ch:+.2f}% — fundamental "
+                               f"context: {b}")
+                except Exception:
+                    pass
         elif agent.name == "Microstructure Analyst":
             if not self.l2lab:
                 msg = "crypto L2 feed not wired — experiment idle"
