@@ -924,7 +924,7 @@ async function toggleAgent(name,enabled){
 }
 
 /* ============================================================ views */
-const TABS=[["markets","MKT"],["launch","LAUNCH"],["portfolio","PORT"],["risk","RISK"],["calendar","CAL"],["screen","SCREEN"],["alerts","ALERTS"],["agents","AGENTS"],["strats","STRAT"],["universe","UNIVERSE"],["data","DATA"],["audit","AUDIT"],["journal","JOURNAL"]];
+const TABS=[["markets","MKT"],["launch","LAUNCH"],["portfolio","PORT"],["risk","RISK"],["calendar","CAL"],["screen","SCREEN"],["alerts","ALERTS"],["inbox","INBOX"],["agents","AGENTS"],["strats","STRAT"],["universe","UNIVERSE"],["data","DATA"],["audit","AUDIT"],["journal","JOURNAL"]];
 function nav(page,sym){S.page=page;S.sym=sym??S.sym;
   location.hash=page==="security"?`/sec/${S.sym}`:`/${page}`;
   render();$("#view").scrollTop=0}
@@ -1503,6 +1503,38 @@ async function addAlert(){
   catch(e){toast(e.detail||"failed to add alert","err")}
 }
 async function pollAlerts(){try{S.alerts=await j("/api/alerts");if(S.page==="alerts")render()}catch(e){}}
+const KIND_LBL={triangular:["ARB","amber"],pick:["PICK","up"],pairs:["PAIR","up"],filing:["FILING",""]};
+function vInbox(){
+  const d=S.inbox||{proposals:[],notify:"none"};
+  const ps=d.proposals||[];
+  const rows=ps.length?ps.map(p=>{const k=KIND_LBL[p.kind]||[p.kind.toUpperCase(),""];
+    const when=new Date(p.ts*1000).toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"});
+    const tradable=p.symbol&&p.side;
+    return `<tr><td><span class="pill ${k[1]}">${k[0]}</span></td>
+      <td><b>${esc(p.agent)}</b><br><span class="mut" style="font-size:10px">${when}</span></td>
+      <td>${p.symbol?`<span class="sym" data-resolve="${esc(p.symbol)}" style="cursor:pointer">${esc(p.symbol)}</span> `:""}${esc(p.summary)}</td>
+      <td style="white-space:nowrap">${tradable?`<button class="btn tiny" data-promote="${p.id}|${esc(p.symbol)}|${esc(p.side)}">Trade ↗</button> `:""}
+        <button class="btn tiny ghost" data-dismiss="${p.id}">Dismiss</button></td></tr>`}).join("")
+    :`<tr><td colspan="4" class="mut">No open proposals. Agents file actionable proposals here — triangular-arb signals, fundamental top picks — when their scans surface something. They PROPOSE; you (and the gateway) dispose.</td></tr>`;
+  const nch=d.notify||"none";
+  const notifChip=nch==="none"
+    ? `<span class="pill" title="set QTSYS_NTFY_TOPIC / QTSYS_TG_TOKEN+CHAT / QTSYS_SLACK_WEBHOOK to get pushes when away">push: off</span>`
+    : `<span class="pill up">push: ${esc(nch)}</span>`;
+  return `
+  <div class="panel"><div class="ph">Proposal inbox <span class="right">${notifChip} &nbsp; <span class="mut">${ps.length} open</span></span></div>
+    <table><thead><tr><th>Kind</th><th>From</th><th>Proposal</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="note">Promoting opens a <b>prefilled, confirm-gated order ticket</b> on the instrument — it never sends directly. Every promoted order still passes the ExecutionGateway checks. Proposals de-duplicate and expire after 12h.</div></div>`;
+}
+async function promoteProposal(pid,sym,side){
+  j("/api/proposals/"+pid+"/dismiss",{method:"POST"}).catch(()=>{});   // leaves inbox once acted on
+  toast("opening ticket for "+sym+"…");
+  await resolveSym(sym);                       // seeds + navigates to the security page
+  S.ticket={side:side||"buy",type:"market"};
+  if(S.page==="security")render();
+}
+async function pollInbox(){try{S.inbox=await j("/api/proposals");if(S.page==="inbox")render();
+  const n=(S.inbox.proposals||[]).length;const t=$$('[data-nav="inbox"]');
+  t.forEach(b=>{b.textContent=n?`INBOX ${n}`:"INBOX";b.classList.toggle("hasnew",n>0)});}catch(e){}}
 /* ============================================================ LAUNCHPAD */
 const LP_TYPES=[["watch","Quote monitor"],["chart","Chart"],["news","News"],
   ["filings","SEC filings"],["l2","Depth (L2)"],["movers","Top movers"],["book","Positions"]];
@@ -2061,7 +2093,7 @@ function fxOpen(){const d=new Date(),u=d.getUTCDay(),h=d.getUTCHours();
 
 /* ============================================================ render */
 const VIEWS={markets:vMarkets,security:vSecurity,portfolio:vPortfolio,
-  risk:vRisk,agents:vAgents,strats:vStrats,universe:vUniverse,audit:vAudit,journal:vJournals,industry:vIndustry,options:vOptions,calendar:vCalendar,screen:vScreen,alerts:vAlerts,data:vData,launch:vLaunch};
+  risk:vRisk,agents:vAgents,strats:vStrats,universe:vUniverse,audit:vAudit,journal:vJournals,industry:vIndustry,options:vOptions,calendar:vCalendar,screen:vScreen,alerts:vAlerts,data:vData,launch:vLaunch,inbox:vInbox};
 function render(scroll){
   // header
   $("#modechip").className="chip "+(S.mode==="live"?"live":"demo");
@@ -2272,6 +2304,10 @@ document.addEventListener("click",e=>{
   if(ro){resolveSym(ro.dataset.resolve);return}
   const strat=e.target.closest("[data-strat]");
   if(strat){S.stratOpen=S.stratOpen===strat.dataset.strat?null:strat.dataset.strat;render();return}
+  const promo=e.target.closest("[data-promote]");
+  if(promo){const[pid,sym,side]=promo.dataset.promote.split("|");promoteProposal(pid,sym,side);return}
+  const dis=e.target.closest("[data-dismiss]");
+  if(dis){j("/api/proposals/"+dis.dataset.dismiss+"/dismiss",{method:"POST"}).then(pollInbox).catch(()=>{});return}
   const gen=e.target.closest("[data-gen]");
   if(gen){genReport(gen.dataset.gen);return}
   const rdel=e.target.closest("[data-repdel]");
@@ -2317,6 +2353,7 @@ function routeFromHash(initial){
       if(["agents","portfolio","risk"].includes(S.page)
         &&document.activeElement.tagName!=="INPUT")render()},2000);
     setInterval(fastTick,1000);   // second-by-second on the watched symbol
+    pollInbox();setInterval(pollInbox,20000);   // proposal inbox + tab badge
   }
 })();
 </script>

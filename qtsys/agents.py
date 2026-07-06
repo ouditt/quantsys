@@ -66,6 +66,28 @@ class AgentDaemon:
         self._tasks: list[asyncio.Task] = []
         self.llm_fn: Callable[[str], str] | None = None   # optional Claude hook
         self.l2lab = None                                 # crypto-L2 experiment (set by server)
+        try:
+            from .proposals import ProposalStore
+            self.proposals = ProposalStore()              # agent -> action inbox
+        except Exception:
+            self.proposals = None
+
+    def propose(self, agent, kind, summary, notify_priority=None, **kw):
+        """Durable actionable proposal + optional out-of-band push. Agents
+        still only PROPOSE; the gateway disposes."""
+        pid = None
+        if self.proposals:
+            try:
+                pid = self.proposals.propose(agent, kind, summary, **kw)
+            except Exception:
+                pass
+        if notify_priority:
+            try:
+                from . import notify
+                notify.send(f"QTSYS · {agent}", summary, notify_priority)
+            except Exception:
+                pass
+        return pid
 
     # ------------------------------------------------------------- persistence
     def _load_state(self, name: str, default: bool) -> bool:
@@ -353,6 +375,13 @@ class AgentDaemon:
             n_pit = PITStore().snapshot([s for s, _ in rows], fund)
         except Exception:
             pass
+        best_sym, best_m = ranked[0]
+        tgt, last = best_m.get("target_mean"), (q.get(best_sym) or {}).get("last")
+        up = (f", analyst target +{(tgt / last - 1) * 100:.0f}%"
+              if isinstance(tgt, (int, float)) and last else "")
+        self.propose("Fundamental Analyst", "pick",
+                     f"{best_sym} tops the value/growth/quality composite{up}",
+                     symbol=best_sym, side="buy", dedup=f"fund_pick:{best_sym}")
         return (f"FUNDAMENTAL BRIEF filed -> reports/; favours "
                 f"{', '.join(s for s, _ in ranked[:3])}; "
                 f"richest {ranked[-1][0]}; PIT vintages +{n_pit}")
@@ -456,10 +485,15 @@ class AgentDaemon:
             if "error" in t:
                 continue
             if t["signal"]:
-                self.log("Arb Strategist",
-                         f"⚠ TRIANGULAR SIGNAL {tri}: {t['best']['path']} nets "
-                         f"{t['best']['edge_bps']:+.1f}bps on $1k after fees — "
-                         "PROPOSAL only, gateway owns execution", "warn")
+                msg = (f"TRIANGULAR {tri}: {t['best']['path']} nets "
+                       f"{t['best']['edge_bps']:+.1f}bps on $1k after fees")
+                self.log("Arb Strategist", "⚠ " + msg +
+                         " — PROPOSAL only, gateway owns execution", "warn")
+                first = tri.split("-")[0]
+                self.propose("Arb Strategist", "triangular", msg,
+                             notify_priority="high", symbol=f"{first}/USD",
+                             side="buy", payload={"edge_bps": t["best"]["edge_bps"],
+                             "path": t["best"]["path"]}, dedup=f"tri:{tri}")
             best = max(t["fwd"]["edge_bps"], t["rev"]["edge_bps"])
             reads.append(f"{tri} {best:+.0f}bps")
         return ("triangular loops: " + ", ".join(reads) +

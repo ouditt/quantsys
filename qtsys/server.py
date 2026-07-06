@@ -461,6 +461,11 @@ async def _alerts_loop():
                                     "message": msg, "symbol": a["symbol"]})
                     del feed[100:]
                     state["daemon"].log("Alerts", "🔔 " + msg, "warn")
+                    try:
+                        from . import notify
+                        notify.send(f"QTSYS alert · {a['symbol']}", msg, "high")
+                    except Exception:
+                        pass
         except Exception:
             pass
         await asyncio.sleep(8)
@@ -924,6 +929,31 @@ async def risk_attribution():
     return await asyncio.to_thread(_calc)
 
 
+@app.get("/api/proposals")
+def proposals_list():
+    """The agent -> action inbox: durable, de-duplicated actionable proposals."""
+    st = getattr(state.get("daemon"), "proposals", None)
+    if not st:
+        return {"proposals": [], "notify": _notify_channel()}
+    return {"proposals": st.open(), "notify": _notify_channel()}
+
+
+@app.post("/api/proposals/{pid}/dismiss")
+def proposal_dismiss(pid: int):
+    st = getattr(state.get("daemon"), "proposals", None)
+    if not st or not st.set_status(pid, "dismissed"):
+        raise HTTPException(404, "no such open proposal")
+    return {"ok": True}
+
+
+def _notify_channel() -> str:
+    try:
+        from . import notify
+        return notify.channel()
+    except Exception:
+        return "none"
+
+
 @app.get("/api/l2/report")
 async def l2_report():
     """The crypto-L2 benefit A/B report the Microstructure Analyst files weekly."""
@@ -1029,6 +1059,13 @@ def kill():
     state["gw"].halt("manual kill switch")
     state["daemon"].log("system", "KILL SWITCH — book flattened, trading halted",
                         "error")
+    try:
+        from . import notify
+        notify.send("QTSYS · KILL SWITCH",
+                    "Book flattened, trading halted. Agents keep monitoring.",
+                    "urgent")
+    except Exception:
+        pass
     return {"halted": True}
 
 
