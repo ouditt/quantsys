@@ -1575,7 +1575,7 @@ async function addAlert(){
   catch(e){toast(e.detail||"failed to add alert","err")}
 }
 async function pollAlerts(){try{S.alerts=await j("/api/alerts");if(S.page==="alerts")render()}catch(e){}}
-const KIND_LBL={triangular:["ARB","amber"],pick:["PICK","up"],pairs:["PAIR","up"],filing:["FILING",""]};
+const KIND_LBL={triangular:["ARB","amber"],pick:["PICK","up"],pairs:["PAIR","up"],filing:["FILING",""],intraday:["INTRA","warn"],plan_approval:["PLAN","amber"]};
 function vInbox(){
   const d=S.inbox||{proposals:[],notify:"none"};
   const ps=d.proposals||[];
@@ -1624,12 +1624,18 @@ function vPlan(){
       <span class="mut">realized today <b class="${(a.realized_today||0)>=0?"up":"dn"}">${m(a.realized_today)}</b></span>
       <span class="mut">loss breaker <b>${a.max_daily_loss?(a.max_daily_loss*100).toFixed(0)+"%":"—"}</b></span>
       <span class="mut">per-symbol cap <b>${a.max_symbol_pct?(a.max_symbol_pct*100).toFixed(0)+"% eq":"—"}</b></span>
-      <span class="mut" title="distinct paper trading days proven; live stays locked until this reaches the requirement">live unlock <b>${a.paper_days??0}/${a.paper_days_req??60} paper days</b></span></div>
+      <span class="mut" title="distinct paper trading days proven; live stays locked until this reaches the requirement">live unlock <b>${a.paper_days??0}/${a.paper_days_req??60} paper days</b></span>
+      <span class="mut">DSR gate <b>${a.require_dsr?"on":"OFF"}</b></span>
+      <button class="btn tiny ${a.options_on?"":"ghost"}" id="atOptions" title="auto-trade defined-risk verticals instead of shares when an idea carries one">options: ${a.options_on?"ON":"off"}</button></div>
     ${liveWarn?`<div class="note" style="border-color:var(--dn)">Broker is LIVE but QTSYS_AUTOTRADE_LIVE is not set — the engine will refuse to send. This is the safety lock.</div>`:""}
     <table><thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Stop</th><th>Target</th></tr></thead><tbody>${mpos}</tbody></table>
     <div class="note">The auto-trader enters the adopted plan and manages its own TP/SL exits. New intraday opportunities go to the <b>INBOX</b> for your approval, not here. Every order still passes the gateway; the kill switch flattens and disarms.</div></div>`;
   // ---- the plan ----
   const badge=t=>{const M={half_size:["½ size","warn"],earnings_flag:["earnings","warn"],liquidity_flag:["thin","dn"]};
+    let out=t.verified?`<span class="pill up" style="font-size:9px" title="DSR-verified — auto-tradable">DSR ✓</span> `:`<span class="pill" style="font-size:9px" title="not DSR-verified — auto-trader skips; approve via INBOX">manual</span> `;
+    if(t.options_alt)out+=`<span class="pill amber" style="font-size:9px" title="defined-risk vertical: ${t.options_alt.contracts}x ${t.options_alt.preset} · debit $${t.options_alt.debit_per}/ct · max loss prepaid">⚙ ${esc(t.options_alt.preset.replace("_"," "))} ${t.options_alt.contracts}x</span> `;
+    return out+Object.keys(M).filter(k=>t[k]).map(k=>`<span class="pill ${M[k][1]}" style="font-size:9px">${M[k][0]}</span>`).join(" ")};
+  const _oldbadge=t=>{const M={half_size:["½ size","warn"],earnings_flag:["earnings","warn"],liquidity_flag:["thin","dn"]};
     return Object.keys(M).filter(k=>t[k]).map(k=>`<span class="pill ${M[k][1]}" style="font-size:9px">${M[k][0]}</span>`).join(" ")};
   const rows=(p.ideas||[]).map(i=>`<tr class="rowlink" data-resolve="${esc(i.symbol)}">
     <td><span class="pill ${i.side==="LONG"?"up":"dn"}">${i.side}</span></td>
@@ -2314,6 +2320,9 @@ function render(scroll){
       const go=async()=>{try{S.autotrader=await j("/api/autotrader/toggle",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:arming})});
         toast("auto-trader "+(arming?"ARMED":"disarmed"),arming?"warn":"ok");render()}catch(e){toast("toggle failed","err")}};
       if(arming)confirmBox("Arm auto-trader","Arming lets the engine place and manage LIVE (paper) orders from the adopted plan automatically, within the guardrails. TP/SL exits fire on their own.","ARM",go);else go()};
+    const ao=$("#atOptions");if(ao)ao.onclick=()=>{const on=!(S.autotrader&&S.autotrader.options_on);
+      const go=async()=>{try{S.autotrader=await j("/api/autotrader/toggle",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({options:on})});render()}catch(e){toast("toggle failed","err")}};
+      if(on)confirmBox("Enable options auto-trading","The engine will trade DEFINED-RISK verticals (max loss prepaid at entry) instead of shares for plan ideas that carry a spread alternative. Never naked options.","OPTIONS",go);else go()};
   }
   if(S.page==="launch")lpBind();
   if(S.page==="data"){

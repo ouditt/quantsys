@@ -363,6 +363,38 @@ class AlpacaBroker(Broker):
                 self._req["last"](symbol_or_symbols=symbol))
         return float(t[symbol].price)
 
+    def option_spread_order(self, legs: list[dict], contracts: int,
+                            limit_price: float, close: bool = False) -> dict:
+        """Multi-leg (MLEG) options order — all legs fill together or not at
+        all, which kills the one-leg-filled risk of legging in manually.
+        legs: [{symbol, qty}] with qty sign = long/short the leg.
+        limit_price: net debit (+) / credit (-) per contract, in per-share
+        terms (Alpaca convention). close=True flips intents to *_to_close."""
+        try:
+            from alpaca.trading.requests import (LimitOrderRequest,
+                                                 OptionLegRequest)
+            from alpaca.trading.enums import (OrderClass, OrderSide,
+                                              PositionIntent, TimeInForce)
+            mleg = []
+            for l in legs:
+                long_leg = (l["qty"] > 0) != close      # closing flips sides
+                mleg.append(OptionLegRequest(
+                    symbol=l["symbol"], ratio_qty=abs(int(l.get("ratio", 1))),
+                    side=OrderSide.BUY if long_leg else OrderSide.SELL,
+                    position_intent=(
+                        (PositionIntent.BUY_TO_OPEN if long_leg
+                         else PositionIntent.SELL_TO_OPEN) if not close else
+                        (PositionIntent.BUY_TO_CLOSE if long_leg
+                         else PositionIntent.SELL_TO_CLOSE))))
+            req = LimitOrderRequest(qty=int(contracts),
+                                    order_class=OrderClass.MLEG, legs=mleg,
+                                    limit_price=round(float(limit_price), 2),
+                                    time_in_force=TimeInForce.DAY)
+            r = self.c.submit_order(req)
+            return {"status": r.status.value, "id": str(r.id)}
+        except Exception as e:
+            return {"status": "rejected", "reason": f"venue: {str(e)[:200]}"}
+
     def crypto_orderbook(self, symbol: str, depth: int = 20) -> dict:
         """Live L2 depth-of-book for a crypto pair (free on Alpaca). Returns
         {'bids': [(price, size), ...], 'asks': [...], 'ts': iso}. Empty on error

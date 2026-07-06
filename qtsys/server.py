@@ -1348,6 +1348,36 @@ def _assemble_plan_data() -> dict:
     }
 
 
+def _attach_options_alts(plan: dict, max_ideas: int = 3) -> int:
+    """Give the top DSR-verified equity ideas a defined-risk vertical
+    alternative from the live chain (used by the auto-trader only when
+    options trading is switched on; always visible to the human)."""
+    from . import optexec
+    broker = state["broker"]
+    if not hasattr(broker, "option_chain"):
+        return 0
+    n = 0
+    for idea in plan.get("ideas", []):
+        if n >= max_ideas or not idea.get("verified") or "/" in idea["symbol"]:
+            continue
+        try:
+            ch = _build_chain(broker, idea["symbol"], "")
+            exps = ch.get("expirations") or []
+            exp = next((e for e in exps
+                        if (optexec.days_to_expiry(e) or 0) >= 5), "")
+            if exp and exp != ch.get("expiration"):
+                ch = _build_chain(broker, idea["symbol"], exp)
+            sp = optexec.pick_spread(ch.get("chain") or [], ch.get("spot") or 0,
+                                     idea["side"], idea.get("risk_amt") or 0,
+                                     expiration=ch.get("expiration", ""))
+            if sp:
+                idea["options_alt"] = sp
+                n += 1
+        except Exception:
+            continue
+    return n
+
+
 def _build_and_adopt_plan(execute: bool = False) -> dict:
     """PM drafts, the desk deliberates one round, the plan is adopted (and
     optionally auto-executed if the engine is armed)."""
@@ -1356,10 +1386,25 @@ def _build_and_adopt_plan(execute: bool = False) -> dict:
     plan = tradeplan.draft(data)
     plan = tradeplan.deliberate(plan, data,
                                 getattr(state["daemon"], "llm_fn", None))
+    try:
+        plan["options_alts"] = _attach_options_alts(plan)
+    except Exception:
+        plan["options_alts"] = 0
     state["planstore"].save(plan)
     state["daemon"].log("Portfolio Manager",
                         f"DAY PLAN adopted: {len(plan['ideas'])} ideas, "
                         f"{plan.get('dropped', 0)} dropped in review", "warn")
+    # verified -> machine may trade; unverified -> the human decides (INBOX)
+    for idea in plan.get("ideas", []):
+        if not idea.get("verified"):
+            state["daemon"].propose(
+                "Portfolio Manager", "plan_approval",
+                f"{idea['side']} {idea['symbol']} ({idea['strategy']}) — in "
+                f"today's plan but not DSR-verified; approve to trade manually",
+                symbol=idea["symbol"],
+                side="buy" if idea["side"] == "LONG" else "sell",
+                qty=idea.get("qty") or 0,
+                dedup=f"plan:{plan['date']}:{idea['symbol']}", ttl=10 * 3600)
     if execute:
         plan["execution"] = state["autotrader"].execute_plan(plan)
         state["planstore"].save(plan)
@@ -1522,7 +1567,13 @@ def autotrader_toggle(body: dict):
     at = state.get("autotrader")
     if not at:
         raise HTTPException(400, "auto-trader unavailable")
-    at.set_enabled(bool(body.get("enabled")))
+    if "enabled" in body:
+        at.set_enabled(bool(body.get("enabled")))
+    if "options" in body:                          # defined-risk verticals only
+        at.options_on = bool(body.get("options"))
+        state["daemon"].log("AutoTrader", "options auto-trading "
+                            + ("ENABLED (defined-risk verticals only)"
+                               if at.options_on else "disabled"), "warn")
     return at.status()
 
 

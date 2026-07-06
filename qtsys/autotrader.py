@@ -54,11 +54,14 @@ class AutoTrader:
           status TEXT, opened_ts REAL, closed_ts REAL, exit_reason TEXT,
           realized REAL, mode TEXT DEFAULT 'paper');
         CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT);""")
-        try:                                       # migrate pre-mode databases
-            self.db.execute("ALTER TABLE managed ADD COLUMN mode TEXT "
-                            "DEFAULT 'paper'")
-        except Exception:
-            pass
+        for mig in ("ALTER TABLE managed ADD COLUMN mode TEXT DEFAULT 'paper'",
+                    "ALTER TABLE managed ADD COLUMN kind TEXT DEFAULT 'equity'",
+                    "ALTER TABLE managed ADD COLUMN legs TEXT",
+                    "ALTER TABLE managed ADD COLUMN expiration TEXT"):
+            try:                                   # migrate older databases
+                self.db.execute(mig)
+            except Exception:
+                pass
         self.db.commit()
         # armed state persists across restarts; default OFF unless env forces on
         if _env_flag("QTSYS_AUTOTRADE"):
@@ -72,6 +75,11 @@ class AutoTrader:
         # live unlock: distinct PAPER trading days required before the engine
         # will honor QTSYS_AUTOTRADE_LIVE (0 disables the requirement)
         self.paper_days_req = int(os.environ.get("QTSYS_AT_PAPER_DAYS", "60"))
+        # verified edge -> machine may trade it; unverified -> human approves.
+        # QTSYS_AT_REQUIRE_DSR=0 relaxes this (not recommended)
+        self.require_dsr = _env_flag("QTSYS_AT_REQUIRE_DSR", True)
+        # options auto-trading (defined-risk verticals ONLY) — off by default
+        self.options_on = _env_flag("QTSYS_AT_OPTIONS", False)
 
     # ---------------------------------------------------------------- kv/state
     def _get(self, k, d=None):
@@ -121,6 +129,8 @@ class AutoTrader:
                 "max_symbol_pct": self.max_symbol_pct,
                 "paper_days": self.paper_days(),
                 "paper_days_req": self.paper_days_req,
+                "require_dsr": self.require_dsr,
+                "options_on": self.options_on,
                 "realized_today": round(self._realized_today(), 2),
                 "positions": self.open_positions()}
 
@@ -141,11 +151,15 @@ class AutoTrader:
         return float(r[0] or 0.0)
 
     def open_positions(self) -> list[dict]:
+        import json
         rows = self.db.execute(
-            "SELECT id,symbol,side,qty,entry,stop,target,opened_ts FROM managed "
+            "SELECT id,symbol,side,qty,entry,stop,target,opened_ts,"
+            "COALESCE(kind,'equity'),legs,expiration FROM managed "
             "WHERE status='open' ORDER BY opened_ts DESC").fetchall()
         return [{"id": r[0], "symbol": r[1], "side": r[2], "qty": r[3],
-                 "entry": r[4], "stop": r[5], "target": r[6], "opened_ts": r[7]}
+                 "entry": r[4], "stop": r[5], "target": r[6], "opened_ts": r[7],
+                 "kind": r[8], "legs": json.loads(r[9]) if r[9] else None,
+                 "expiration": r[10]}
                 for r in rows]
 
     # ------------------------------------------------------- guardrail check
@@ -204,10 +218,23 @@ class AutoTrader:
                 skipped.append((sym, "max concurrent")); continue
             if not idea.get("qty") or not idea.get("stop") or not idea.get("target"):
                 skipped.append((sym, "unsized")); continue
+            if self.require_dsr and not idea.get("verified"):
+                skipped.append((sym, "not DSR-verified — needs INBOX approval"))
+                continue
             want = abs(float(idea.get("notional") or 0))
             if sym_cap and exposure.get(sym, 0.0) + want > sym_cap:
                 skipped.append((sym, f"per-symbol cap: {exposure.get(sym, 0.0) + want:,.0f}"
                                 f" > {self.max_symbol_pct:.0%} of equity"))
+                continue
+            # options alternative: defined-risk vertical instead of shares,
+            # only when the operator has switched options trading on
+            if self.options_on and idea.get("options_alt"):
+                ok, why = self._enter_spread(idea, plan.get("date", self._today()))
+                if ok:
+                    done += 1
+                    existing.add(sym)
+                else:
+                    skipped.append((sym, why))
                 continue
             side = "buy" if idea["side"] in ("LONG", "buy") else "sell"
             o = Order(self._venue(sym), side, float(idea["qty"]), "market", None)
@@ -235,6 +262,37 @@ class AutoTrader:
                         "high")
         return {"executed": done, "skipped": skipped}
 
+    def _enter_spread(self, idea: dict, plan_date: str) -> tuple[bool, str]:
+        """Enter a defined-risk vertical (from optexec.pick_spread). Max loss
+        is the prepaid debit — sized inside the idea's risk budget already."""
+        import json
+        sp = idea["options_alt"]
+        if not hasattr(self.broker, "option_spread_order"):
+            return False, "venue has no multi-leg options support"
+        # marketable limit: debit per share + 2% buffer, so all legs fill
+        # together or the order rests — never legged in
+        lim = round(sp["debit_per"] / 100.0 * 1.02, 2)
+        res = self.broker.option_spread_order(sp["legs"], sp["contracts"], lim)
+        self._bump_orders()
+        if res.get("status") == "rejected":
+            return False, f"spread: {res.get('reason', 'rejected')}"
+        self.db.execute(
+            "INSERT INTO managed(plan_date,symbol,side,qty,entry,stop,target,"
+            "order_id,status,opened_ts,realized,mode,kind,legs,expiration) "
+            "VALUES (?,?,?,?,?,?,?,?, 'open', ?, 0, ?, 'ospread', ?, ?)",
+            (plan_date, idea["symbol"], idea["side"], sp["contracts"],
+             sp["debit_per"], sp["exit"]["stop_value"],
+             sp["exit"]["target_value"], res.get("id", ""), time.time(),
+             "paper" if getattr(self.broker, "paper", True) else "live",
+             json.dumps(sp["legs"]), sp.get("expiration", "")))
+        self.db.commit()
+        self.log("AutoTrader",
+                 f"ENTERED {sp['preset']} {sp['contracts']}x {idea['symbol']} "
+                 f"debit ${sp['debit_per']}/contract (max loss "
+                 f"${abs(sp['total_max_loss']):,.0f} prepaid, target "
+                 f"${sp['exit']['target_value']})", "warn")
+        return True, ""
+
     def monitor(self) -> dict:
         """Close managed positions that hit TP or SL; reconcile on halt."""
         closed = 0
@@ -242,6 +300,10 @@ class AutoTrader:
         for p in self.open_positions():
             if halted:                             # kill switch flattened the book
                 self._mark_closed(p["id"], "halt", None)
+                continue
+            if p.get("kind") == "ospread":         # defined-risk vertical
+                if self._monitor_spread(p):
+                    closed += 1
                 continue
             try:
                 px = self.broker.get_quote(self._venue(p["symbol"]))
@@ -257,6 +319,39 @@ class AutoTrader:
                 if self._close(p, px, hit):
                     closed += 1
         return {"closed": closed, "open": len(self.open_positions())}
+
+    def _monitor_spread(self, p: dict) -> bool:
+        """TP/SL/time exit for a managed vertical: value the legs, apply the
+        optexec exit rules, close with an MLEG order when one fires."""
+        from . import optexec
+        val = optexec.spread_value(p["legs"] or [], self.broker.get_quote)
+        spread = {"exit": {"target_value": p["target"], "stop_value": p["stop"],
+                           "time_exit_days": optexec.TIME_EXIT_DAYS},
+                  "expiration": p.get("expiration", "")}
+        reason = optexec.exit_check(val, spread)
+        if not reason:
+            return False
+        lim = round(max((val if val is not None else p["entry"]), 0.01)
+                    / 100.0 * 0.98, 2)             # marketable close limit
+        res = self.broker.option_spread_order(p["legs"], int(p["qty"]), lim,
+                                              close=True)
+        self._bump_orders()
+        if res.get("status") == "rejected":
+            self.log("AutoTrader", f"spread close REJECTED {p['symbol']}: "
+                     f"{res.get('reason')}", "error")
+            return False
+        realized = ((val - p["entry"]) * p["qty"]) if val is not None else None
+        self._mark_closed(p["id"], reason, realized)
+        self.log("AutoTrader",
+                 f"{'🎯' if reason == 'target' else '🛑' if reason == 'stop' else '⏳'} "
+                 f"spread {reason.upper()} {p['symbol']} @ ${val} — realized "
+                 f"{realized:+.2f}" if realized is not None else
+                 f"spread {reason.upper()} {p['symbol']} (unpriced)", "warn")
+        self.notify(f"QTSYS · spread {reason} · {p['symbol']}",
+                    f"closed {p['qty']}x vertical, P&L "
+                    f"{realized:+.2f}" if realized is not None else
+                    f"closed {p['qty']}x vertical", "high")
+        return True
 
     def _close(self, p: dict, px: float, reason: str) -> bool:
         from .brokers import Order
@@ -304,6 +399,8 @@ class _FakeBroker:
     def __init__(self): self.px = {"AAPL": 200.0}
     def get_quote(self, s): return self.px.get(s, 100.0)
     def get_account(self): return {"equity": 100000.0}
+    def option_spread_order(self, legs, contracts, limit_price, close=False):
+        return {"status": "accepted", "id": "mleg1"}
 
 
 def _selftest():
@@ -315,7 +412,7 @@ def _selftest():
     at.set_enabled(True)
     plan = {"date": at._today(), "ideas": [
         {"symbol": "AAPL", "side": "LONG", "qty": 10, "entry": 200.0,
-         "stop": 194.0, "target": 212.0}]}
+         "stop": 194.0, "target": 212.0, "verified": True}]}
     r = at.execute_plan(plan)
     assert r["executed"] == 1 and len(at.open_positions()) == 1, r
     # price below entry, above stop -> no exit
@@ -333,9 +430,16 @@ def _selftest():
     # per-symbol exposure cap: 10% of 100k equity = 10k; a 20k idea is blocked
     big = {"date": at._today(), "ideas": [
         {"symbol": "MSFT", "side": "LONG", "qty": 100, "entry": 200.0,
-         "stop": 194.0, "target": 212.0, "notional": 20000.0}]}
+         "stop": 194.0, "target": 212.0, "notional": 20000.0,
+         "verified": True}]}
     r = at.execute_plan(big)
     assert r["executed"] == 0 and "per-symbol cap" in r["skipped"][0][1], r
+    # DSR gate: an unverified idea is skipped for INBOX approval
+    unv = {"date": at._today(), "ideas": [
+        {"symbol": "NFLX", "side": "LONG", "qty": 1, "entry": 500.0,
+         "stop": 490.0, "target": 520.0, "notional": 500.0}]}
+    r = at.execute_plan(unv)
+    assert r["executed"] == 0 and "DSR" in r["skipped"][0][1], r
     # live-safety gate 1: a live broker without the flag refuses
     at.broker.paper = False
     os.environ.pop("QTSYS_AUTOTRADE_LIVE", None)
@@ -359,9 +463,51 @@ def _selftest():
     at.paper_days_req = 60
     assert not at.live_ok(), "60-day requirement re-locks"
     os.environ.pop("QTSYS_AUTOTRADE_LIVE", None)
+    # ---- options spread lifecycle (defined-risk vertical) ----
+    at.broker.paper = True
+    at.options_on = True
+    import datetime as _dt
+    exp = str(_dt.date.today() + _dt.timedelta(days=10))
+    sp = {"kind": "ospread", "preset": "bull_call", "side": "LONG",
+          "expiration": exp, "contracts": 2,
+          "legs": [{"symbol": "OC300", "qty": 1, "right": "call",
+                    "strike": 300.0, "mid": 6.0},
+                   {"symbol": "OC310", "qty": -1, "right": "call",
+                    "strike": 310.0, "mid": 2.0}],
+          "debit_per": 400.0, "max_loss_per": -400.0, "max_profit_per": 600.0,
+          "breakevens": [304.0], "total_debit": 800.0, "total_max_loss": -800.0,
+          "exit": {"target_value": 760.0, "stop_value": 200.0,
+                   "time_exit_days": 1}}
+    oplan = {"date": at._today(), "ideas": [
+        {"symbol": "MSFT2", "side": "LONG", "qty": 5, "entry": 200.0,
+         "stop": 194.0, "target": 212.0, "notional": 1000.0, "verified": True,
+         "options_alt": sp}]}
+    r = at.execute_plan(oplan)
+    assert r["executed"] == 1, r
+    pos = [p for p in at.open_positions() if p["kind"] == "ospread"]
+    assert pos and pos[0]["legs"][0]["symbol"] == "OC300", "spread managed"
+    # legs at entry mids -> value 400 = debit -> hold
+    at.broker.px.update({"OC300": 6.0, "OC310": 2.0})
+    assert at.monitor()["closed"] == 0
+    # rally: long leg 9.8, short 1.2 -> value 860 >= 760 target -> close
+    at.broker.px.update({"OC300": 9.8, "OC310": 1.2})
+    assert at.monitor()["closed"] == 1
+    assert not [p for p in at.open_positions() if p["kind"] == "ospread"]
+    row = at.db.execute("SELECT exit_reason, realized FROM managed WHERE "
+                        "kind='ospread' AND status='closed'").fetchone()
+    assert row[0] == "target" and abs(row[1] - (860 - 400) * 2) < 1e-6, row
+    # options off -> options_alt idea falls through to the SHARES path
+    at.options_on = False
+    r2 = at.execute_plan({"date": at._today(), "ideas": [
+        {"symbol": "MSFT3", "side": "LONG", "qty": 2, "entry": 200.0,
+         "stop": 194.0, "target": 212.0, "notional": 400.0, "verified": True,
+         "options_alt": sp}]})
+    assert r2["executed"] == 1
+    assert [p for p in at.open_positions() if p["symbol"] == "MSFT3"][0]["kind"] == "equity"
     print("autotrader self-test ✓  disarmed default, enter->TP profit->SL loss, "
-          "gateway routed, per-symbol cap, live-without-flag refused, "
-          "60-paper-day lock (live days excluded)")
+          "gateway routed, per-symbol cap, DSR gate, live-without-flag refused, "
+          "60-paper-day lock, spread enter->target close (+920 realized), "
+          "options-off falls back to shares")
 
 
 if __name__ == "__main__":

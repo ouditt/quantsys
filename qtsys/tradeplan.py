@@ -65,7 +65,10 @@ def draft(data: dict) -> dict:
     ideas = []
     seen = set()
 
-    def add(sym, side, strategy, source, rationale, tier="", dsr=None):
+    verified_set = set(data.get("verified_strategies", []))
+
+    def add(sym, side, strategy, source, rationale, tier="", dsr=None,
+            verified=False):
         if sym in seen:
             return
         px = quote(sym)
@@ -75,6 +78,7 @@ def draft(data: dict) -> dict:
         ideas.append(_size_idea(
             {"symbol": sym, "side": side, "strategy": strategy, "source": source,
              "rationale": rationale, "tier": tier, "dsr": dsr,
+             "verified": bool(verified),
              "entry": round(px, 4), "atr": atr(sym)},
             equity, risk_pct, maxN))
 
@@ -84,13 +88,16 @@ def draft(data: dict) -> dict:
         add(s["asset"], side, s.get("strategy", "?"), "scan",
             f"fresh {s.get('family','')} signal"
             + (f", hist exp {exp:+.2%}/trade" if isinstance(exp, (int, float)) else ""),
-            tier=s.get("tier", ""))
+            tier=s.get("tier", ""),
+            verified=s.get("strategy") in verified_set)
     for a in data.get("arb_survivors", [])[:3]:       # DSR-passed stat-arb
         add(a["y"], "LONG", f"pairs {a['y']}~{a['x']}", "arb",
-            f"cointegrated (DSR {a.get('dsr')}), long the spread", dsr=a.get("dsr"))
+            f"cointegrated (DSR {a.get('dsr')}), long the spread",
+            dsr=a.get("dsr"), verified=(a.get("dsr") or 0) >= 0.95)
     for f in data.get("fundamental_picks", [])[:2]:   # value/quality picks
         add(f["symbol"], "LONG", "fundamental", "fundamental",
-            f.get("rationale", "top of the value/growth composite"))
+            f.get("rationale", "top of the value/growth composite"),
+            verified=False)                           # no backtest -> human call
 
     sized = [i for i in ideas if i.get("stop") and i.get("qty")]   # drop unsized
     return {"date": str(datetime.date.today()), "posture": posture,
@@ -132,17 +139,17 @@ def _risk_review(plan, data):
 
 
 def _validation_review(plan, data):
-    verified = set(data.get("verified_strategies", []))
     rejects, notes = set(), []
     for i, idea in enumerate(plan["ideas"]):
-        if idea["source"] == "scan" and idea["strategy"] not in verified:
-            notes.append(f"{idea['symbol']}/{idea['strategy']}: strategy not DSR-"
-                         "verified — allowed at HALF size, paper-first")
+        if not idea.get("verified"):
+            notes.append(f"{idea['symbol']}/{idea['strategy']}: not DSR-verified "
+                         "— HALF size, and the auto-trader will NOT touch it "
+                         "(routes to the INBOX for human approval)")
             idea["qty"] = round(idea["qty"] * 0.5, 6)
             idea["notional"] = round(idea["notional"] * 0.5, 2)
             idea["half_size"] = True
     if not notes:
-        notes.append("all ideas trace to a verified strategy or a DSR-passed edge")
+        notes.append("all ideas trace to a DSR-verified strategy — machine-tradable")
     return {"agent": "Validation Officer", "notes": notes, "rejects": rejects}
 
 
