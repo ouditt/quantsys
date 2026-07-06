@@ -76,10 +76,42 @@ class AutoTrader:
         # will honor QTSYS_AUTOTRADE_LIVE (0 disables the requirement)
         self.paper_days_req = int(os.environ.get("QTSYS_AT_PAPER_DAYS", "60"))
         # verified edge -> machine may trade it; unverified -> human approves.
-        # QTSYS_AT_REQUIRE_DSR=0 relaxes this (not recommended)
-        self.require_dsr = _env_flag("QTSYS_AT_REQUIRE_DSR", True)
+        # Both knobs are operator-settable at runtime (PLAN page) and persist
+        # in the kv store; env vars only seed the first boot.
+        if self._get("require_dsr") is None:
+            self._set("require_dsr",
+                      "1" if _env_flag("QTSYS_AT_REQUIRE_DSR", True) else "0")
+        if self._get("dsr_threshold") is None:
+            self._set("dsr_threshold",
+                      os.environ.get("QTSYS_AT_DSR_THRESHOLD", "0.95"))
         # options auto-trading (defined-risk verticals ONLY) — off by default
         self.options_on = _env_flag("QTSYS_AT_OPTIONS", False)
+
+    @property
+    def require_dsr(self) -> bool:
+        return self._get("require_dsr") == "1"
+
+    @property
+    def dsr_threshold(self) -> float:
+        try:
+            return float(self._get("dsr_threshold", "0.95"))
+        except Exception:
+            return 0.95
+
+    def set_dsr_gate(self, require: bool | None = None,
+                     threshold: float | None = None):
+        if require is not None:
+            self._set("require_dsr", "1" if require else "0")
+            self.log("AutoTrader", "DSR gate "
+                     + ("ON — only verified edge auto-trades" if require else
+                        "OFF — the engine may trade UNVERIFIED ideas (operator "
+                        "override)"), "warn")
+        if threshold is not None:
+            t = min(max(float(threshold), 0.0), 1.0)
+            self._set("dsr_threshold", str(t))
+            self.log("AutoTrader", f"DSR threshold set to {t:g} "
+                     + ("(below the 0.95 'likely real' bar — expect more "
+                        "noise trades)" if t < 0.95 else ""), "warn")
 
     # ---------------------------------------------------------------- kv/state
     def _get(self, k, d=None):
@@ -130,6 +162,7 @@ class AutoTrader:
                 "paper_days": self.paper_days(),
                 "paper_days_req": self.paper_days_req,
                 "require_dsr": self.require_dsr,
+                "dsr_threshold": self.dsr_threshold,
                 "options_on": self.options_on,
                 "realized_today": round(self._realized_today(), 2),
                 "positions": self.open_positions()}
@@ -218,9 +251,15 @@ class AutoTrader:
                 skipped.append((sym, "max concurrent")); continue
             if not idea.get("qty") or not idea.get("stop") or not idea.get("target"):
                 skipped.append((sym, "unsized")); continue
-            if self.require_dsr and not idea.get("verified"):
-                skipped.append((sym, "not DSR-verified — needs INBOX approval"))
-                continue
+            if self.require_dsr:
+                d = idea.get("dsr")
+                ok = ((d is not None and d >= self.dsr_threshold)
+                      or (d is None and idea.get("verified")))
+                if not ok:
+                    skipped.append((sym, f"DSR {d if d is not None else '—'} < "
+                                    f"{self.dsr_threshold:g} gate — needs INBOX "
+                                    "approval"))
+                    continue
             want = abs(float(idea.get("notional") or 0))
             if sym_cap and exposure.get(sym, 0.0) + want > sym_cap:
                 skipped.append((sym, f"per-symbol cap: {exposure.get(sym, 0.0) + want:,.0f}"

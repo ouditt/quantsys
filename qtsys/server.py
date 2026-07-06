@@ -1301,17 +1301,47 @@ def _assemble_plan_data() -> dict:
     except Exception:
         pass
     setups = (universe.load_last_result("1Day") or {}).get("setups", [])
-    # verified strategies from the registry summary
-    verified = set()
+    # per-strategy DSR from the registry summary; "verified" is judged against
+    # the auto-trader's OPERATOR-SET threshold (PLAN page), not a constant
+    at = state.get("autotrader")
+    thr = at.dsr_threshold if at else 0.95
+    strategy_dsr: dict = {}
     try:
         import pandas as pd
         p = os.path.join(HERE, "registry_summary.csv")
         if os.path.exists(p):
             d = pd.read_csv(p)
             dd = pd.to_numeric(d.get("dsr"), errors="coerce")
-            verified = set(d[dd >= 0.95]["id"].astype(str))
+            strategy_dsr = {str(i): float(v) for i, v in
+                            zip(d["id"].astype(str), dd) if v == v}
     except Exception:
         pass
+    verified = {s for s, v in strategy_dsr.items() if v >= thr}
+    # commodity/FX signals from the bundled daily scan, mapped to TRADABLE ETF
+    # proxies (WTI itself isn't on Alpaca; USO is) — signal & DSR inherited
+    PROXY = {"WTI": "USO", "BRENT": "BNO", "NATGAS": "UNG", "GOLD": "GLD",
+             "EURUSD": "FXE", "GBPUSD": "FXB", "AUDUSD": "FXA",
+             "JPYUSD": "FXY", "CHFUSD": "FXF", "CADUSD": "FXC"}
+    prox = []
+    try:
+        from .routine import scan as _bundled_scan
+        for _, h in _bundled_scan().iterrows():
+            proxy = PROXY.get(str(h.get("asset", "")))
+            if not proxy:
+                continue
+            prox.append({
+                "asset": proxy, "strategy": str(h.get("strategy", "?")),
+                "family": f"proxy of {h.get('asset')}",
+                "side": str(h.get("side", "LONG")).upper(),
+                "hist_exp": float(h.get("hist_exp") or 0),
+                "dsr": float(h.get("spec_dsr")) if h.get("spec_dsr") == h.get("spec_dsr") else None,
+                "tier": str(h.get("tier", "")),
+                "proxy_of": str(h.get("asset"))})
+    except Exception:
+        pass
+    # proxies lead: bundled SURVIVOR signals carry real spec DSR and must not
+    # be sliced off behind 200 universe setups
+    setups = prox + setups
     # DSR-passed stat-arb survivors + fundamental picks from open proposals
     arb, funds = [], []
     st = getattr(daemon, "proposals", None)
@@ -1341,7 +1371,8 @@ def _assemble_plan_data() -> dict:
         "max_gross_leverage": state["gw"].limits.max_gross_leverage,
         "quote": _plan_quote, "atr": _atr, "setups": setups,
         "arb_survivors": arb, "fundamental_picks": funds,
-        "verified_strategies": verified, "clusters": clusters,
+        "verified_strategies": verified, "strategy_dsr": strategy_dsr,
+        "dsr_threshold": thr, "clusters": clusters,
         "fundamentals": lambda s: __import__("qtsys.intel", fromlist=["fundamentals"])
         .fundamentals(s, _clsname(s) or "Equity"),
         "orderbook": getattr(state["broker"], "crypto_orderbook", None),
@@ -1574,6 +1605,13 @@ def autotrader_toggle(body: dict):
         state["daemon"].log("AutoTrader", "options auto-trading "
                             + ("ENABLED (defined-risk verticals only)"
                                if at.options_on else "disabled"), "warn")
+    if "require_dsr" in body or "dsr_threshold" in body:
+        try:
+            at.set_dsr_gate(
+                require=bool(body["require_dsr"]) if "require_dsr" in body else None,
+                threshold=float(body["dsr_threshold"]) if "dsr_threshold" in body else None)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "dsr_threshold must be a number 0..1")
     return at.status()
 
 

@@ -1625,14 +1625,17 @@ function vPlan(){
       <span class="mut">loss breaker <b>${a.max_daily_loss?(a.max_daily_loss*100).toFixed(0)+"%":"—"}</b></span>
       <span class="mut">per-symbol cap <b>${a.max_symbol_pct?(a.max_symbol_pct*100).toFixed(0)+"% eq":"—"}</b></span>
       <span class="mut" title="distinct paper trading days proven; live stays locked until this reaches the requirement">live unlock <b>${a.paper_days??0}/${a.paper_days_req??60} paper days</b></span>
-      <span class="mut">DSR gate <b>${a.require_dsr?"on":"OFF"}</b></span>
+      <button class="btn tiny ${a.require_dsr?"":"danger"}" id="atDsr" title="ON: only ideas at/above the DSR threshold auto-trade; others go to the INBOX. OFF: the engine may trade unverified ideas.">DSR gate: ${a.require_dsr?"ON":"OFF"}</button>
+      <span class="mut">≥ <input id="atDsrThr" class="asel" type="number" min="0" max="1" step="0.01" value="${a.dsr_threshold??0.95}" style="width:62px" title="minimum DSR the auto-trader will trade (0.95 = 'likely real edge'; lower admits more noise)"></span>
       <button class="btn tiny ${a.options_on?"":"ghost"}" id="atOptions" title="auto-trade defined-risk verticals instead of shares when an idea carries one">options: ${a.options_on?"ON":"off"}</button></div>
     ${liveWarn?`<div class="note" style="border-color:var(--dn)">Broker is LIVE but QTSYS_AUTOTRADE_LIVE is not set — the engine will refuse to send. This is the safety lock.</div>`:""}
     <table><thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Stop</th><th>Target</th></tr></thead><tbody>${mpos}</tbody></table>
     <div class="note">The auto-trader enters the adopted plan and manages its own TP/SL exits. New intraday opportunities go to the <b>INBOX</b> for your approval, not here. Every order still passes the gateway; the kill switch flattens and disarms.</div></div>`;
   // ---- the plan ----
   const badge=t=>{const M={half_size:["½ size","warn"],earnings_flag:["earnings","warn"],liquidity_flag:["thin","dn"]};
-    let out=t.verified?`<span class="pill up" style="font-size:9px" title="DSR-verified — auto-tradable">DSR ✓</span> `:`<span class="pill" style="font-size:9px" title="not DSR-verified — auto-trader skips; approve via INBOX">manual</span> `;
+    const thr=(S.autotrader&&S.autotrader.dsr_threshold)??0.95;
+    let out=t.dsr!=null?(t.dsr>=thr?`<span class="pill up" style="font-size:9px" title="at/above the auto-trade threshold ${thr}">DSR ${(+t.dsr).toFixed(2)}</span> `:`<span class="pill warn" style="font-size:9px" title="below the auto-trade threshold ${thr} — INBOX approval">DSR ${(+t.dsr).toFixed(2)}</span> `)
+      :(t.verified?`<span class="pill up" style="font-size:9px">DSR ✓</span> `:`<span class="pill" style="font-size:9px" title="no DSR — auto-trader skips; approve via INBOX">manual</span> `);
     if(t.options_alt)out+=`<span class="pill amber" style="font-size:9px" title="defined-risk vertical: ${t.options_alt.contracts}x ${t.options_alt.preset} · debit $${t.options_alt.debit_per}/ct · max loss prepaid">⚙ ${esc(t.options_alt.preset.replace("_"," "))} ${t.options_alt.contracts}x</span> `;
     return out+Object.keys(M).filter(k=>t[k]).map(k=>`<span class="pill ${M[k][1]}" style="font-size:9px">${M[k][0]}</span>`).join(" ")};
   const _oldbadge=t=>{const M={half_size:["½ size","warn"],earnings_flag:["earnings","warn"],liquidity_flag:["thin","dn"]};
@@ -2323,6 +2326,14 @@ function render(scroll){
     const ao=$("#atOptions");if(ao)ao.onclick=()=>{const on=!(S.autotrader&&S.autotrader.options_on);
       const go=async()=>{try{S.autotrader=await j("/api/autotrader/toggle",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({options:on})});render()}catch(e){toast("toggle failed","err")}};
       if(on)confirmBox("Enable options auto-trading","The engine will trade DEFINED-RISK verticals (max loss prepaid at entry) instead of shares for plan ideas that carry a spread alternative. Never naked options.","OPTIONS",go);else go()};
+    const ad=$("#atDsr");if(ad)ad.onclick=()=>{const off=!!(S.autotrader&&S.autotrader.require_dsr);
+      const go=async()=>{try{S.autotrader=await j("/api/autotrader/toggle",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({require_dsr:!off})});
+        toast("DSR gate "+(!off?"ON":"OFF — engine may trade unverified ideas"),!off?"ok":"warn");render()}catch(e){toast("toggle failed","err")}};
+      if(off)confirmBox("Disable the DSR gate","The auto-trader will be AUTHORISED to trade ideas that did NOT pass verification. Unverified means the edge may be noise/overfit — this widens what the machine can lose money on.","UNVERIFIED",go);else go()};
+    const at2=$("#atDsrThr");if(at2)at2.onchange=async()=>{const v=parseFloat(at2.value);
+      if(!(v>=0&&v<=1)){toast("threshold must be 0..1","err");return}
+      try{S.autotrader=await j("/api/autotrader/toggle",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({dsr_threshold:v})});
+        toast("auto-trade DSR threshold ≥ "+v+(v<0.95?" (below the 0.95 'likely real' bar)":""),v<0.95?"warn":"ok");render()}catch(e){toast("failed","err")}};
   }
   if(S.page==="launch")lpBind();
   if(S.page==="data"){

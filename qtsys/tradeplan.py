@@ -66,6 +66,8 @@ def draft(data: dict) -> dict:
     seen = set()
 
     verified_set = set(data.get("verified_strategies", []))
+    strategy_dsr = data.get("strategy_dsr", {})
+    thr = float(data.get("dsr_threshold", 0.95))
 
     def add(sym, side, strategy, source, rationale, tier="", dsr=None,
             verified=False):
@@ -82,18 +84,21 @@ def draft(data: dict) -> dict:
              "entry": round(px, 4), "atr": atr(sym)},
             equity, risk_pct, maxN))
 
-    for s in data.get("setups", [])[:12]:            # ranked scan setups
+    for s in data.get("setups", [])[:16]:            # ranked scan setups
         side = "LONG" if s.get("side") in ("LONG", "buy") else "SHORT"
         exp = s.get("hist_exp")
+        d = s.get("dsr", strategy_dsr.get(s.get("strategy")))
+        via = f" via proxy of {s['proxy_of']}" if s.get("proxy_of") else ""
         add(s["asset"], side, s.get("strategy", "?"), "scan",
-            f"fresh {s.get('family','')} signal"
+            f"fresh {s.get('family','')} signal{via}"
             + (f", hist exp {exp:+.2%}/trade" if isinstance(exp, (int, float)) else ""),
-            tier=s.get("tier", ""),
-            verified=s.get("strategy") in verified_set)
+            tier=s.get("tier", ""), dsr=d,
+            verified=(d is not None and d >= thr)
+            or s.get("strategy") in verified_set)
     for a in data.get("arb_survivors", [])[:3]:       # DSR-passed stat-arb
         add(a["y"], "LONG", f"pairs {a['y']}~{a['x']}", "arb",
             f"cointegrated (DSR {a.get('dsr')}), long the spread",
-            dsr=a.get("dsr"), verified=(a.get("dsr") or 0) >= 0.95)
+            dsr=a.get("dsr"), verified=(a.get("dsr") or 0) >= thr)
     for f in data.get("fundamental_picks", [])[:2]:   # value/quality picks
         add(f["symbol"], "LONG", "fundamental", "fundamental",
             f.get("rationale", "top of the value/growth composite"),
