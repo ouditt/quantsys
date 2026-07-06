@@ -265,6 +265,7 @@ a.logline.nl .src{color:var(--amber);font-size:9.5px;text-transform:uppercase;le
   <span class="chip" id="modechip">…</span>
   <span class="chip" id="clk-eq">EQ —</span>
   <span class="chip open" id="clk-cx">CRYPTO 24/7</span>
+  <span class="chip" id="clk-feed" style="display:none">LIVE</span>
   <button id="agents-led" data-nav="agents" title="agents"><span class="led" id="led"></span><span id="ledtxt">AGENTS</span></button>
   <div id="equity"><div class="v num" id="eqv">—</div><div class="d num" id="eqd">—</div></div>
   <button id="killbtn">KILL</button>
@@ -600,7 +601,18 @@ async function liveRefresh(full){
     if(full){for(const s of Object.keys(S.quotes)){
       const h=await j(`/api/history/${encodeURIComponent(s)}`).catch(()=>null);
       if(h&&h.bars)S.bars[s]=h.bars}}
-  }catch(e){/* transient */}
+    if(qs||acct){S._lastOk=Date.now();}       // at least the core feed answered
+    updateFeedBadge();
+  }catch(e){updateFeedBadge();}
+}
+function updateFeedBadge(){
+  const el=$("#clk-feed");if(!el)return;
+  if(S.mode!=="live"){el.style.display="none";return}
+  const age=S._lastOk?(Date.now()-S._lastOk)/1000:1e9;
+  el.style.display="";
+  if(age<8){el.className="chip open";el.textContent="LIVE";el.title="feed fresh";}
+  else{el.className="chip closed";el.textContent="STALE "+(age>600?"10m+":Math.round(age)+"s");
+    el.title="last successful poll "+Math.round(age)+"s ago — venue or network issue";}
 }
 
 /* ============================================================ analytics */
@@ -842,15 +854,28 @@ function pretrade(sym,side,qty,type,lp){
   return {ok:checks.every(c=>c[1]),checks,notional};
 }
 async function placeOrder(sym,side,qty,type,lp){
+  if(S._sending)return;                       // in-flight lock: no double-submit
   if(!(qty>0)){toast("Enter a quantity","err");return}
   const pre=pretrade(sym,side,qty,type,lp);
   if(!pre.ok){toast("Rejected pre-trade: "+pre.checks.find(c=>!c[1])[0],"err");render();return}
   if(S.mode==="live"){
-    try{const r=await j("/api/orders",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({symbol:sym,side,qty,type,limit_price:lp})});
-      toast(`${r.status.toUpperCase()} ${side.toUpperCase()} ${qty} ${sym}`,r.status==="rejected"?"err":"ok");
-      await liveRefresh();}catch(e){toast("Rejected: "+(e.detail||e.reason||"gateway"),"err")}
-  }else{
+    const est=money((pre.notional||0),0);
+    const px=type==="limit"?`LMT ${fmt(lp,pxd(sym))}`:"MARKET";
+    confirmBox(`${side.toUpperCase()} ${qty} ${sym}`,
+      `${side.toUpperCase()} ${qty} ${sym} · ${px} · est ${est}. Live order to the venue — this sends real (paper) capital through the gateway.`,
+      side.toUpperCase(), async()=>{
+        S._sending=true;const btn=$("#tsend");if(btn){btn.disabled=true;btn.textContent="sending…"}
+        try{const r=await j("/api/orders",{method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({symbol:sym,side,qty,type,limit_price:lp})});
+          if(r.status==="rejected")toast("REJECTED: "+(r.reason||"gateway check"),"err");
+          else toast(`${r.status.toUpperCase()} ${side.toUpperCase()} ${qty} ${sym}`,"ok");
+          await liveRefresh();}
+        catch(e){toast("Rejected: "+(e.detail||e.reason||"gateway"),"err")}
+        S._sending=false;render();
+      });
+    return;
+  }
+  {
     if(type==="market"){pushOrder({symbol:sym,side,qty,type,status:"filled",
       limit_price:null});demoFill(sym,side,qty);
       toast(`FILLED ${side.toUpperCase()} ${qty} ${sym} @ ${fmt(S.quotes[sym].last,pxd(sym))}`,"ok")}
@@ -2043,6 +2068,7 @@ function render(scroll){
   $("#modechip").textContent=S.mode==="live"?"LIVE · PAPER":"REPLAY · REAL HISTORY";
   $("#clk-eq").className="chip "+(eqOpen()?"open":"closed");
   $("#clk-eq").textContent="EQ "+(eqOpen()?"OPEN":"CLOSED");
+  updateFeedBadge();
   const a=S.account;
   $("#eqv").textContent=money(a.equity,0);
   const d=$("#eqd");d.textContent=`${signed(a.day_pnl,0)} today`;d.className="d num "+cls(a.day_pnl);
