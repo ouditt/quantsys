@@ -198,6 +198,7 @@ class RiskLimits:
     max_position_notional: float = 60_000.0
     max_gross_leverage: float = 2.0
     allow_short: bool = True
+    price_band: float = 0.10          # fat-finger: limit px within ±10% of mkt
 
 
 class ExecutionGateway:
@@ -211,9 +212,19 @@ class ExecutionGateway:
     def pretrade_check(self, order: Order) -> str | None:
         if self.halted:
             return f"halted: {self.halt_reason}"
-        px = order.limit_price or self.broker.get_quote(order.symbol)
+        try:
+            mkt = self.broker.get_quote(order.symbol)
+        except Exception:
+            mkt = None
+        px = order.limit_price or mkt
         if not px or px != px:
             return "no market data for symbol"
+        if (order.limit_price and mkt and mkt == mkt
+                and abs(order.limit_price / mkt - 1) > self.limits.price_band):
+            return (f"limit {order.limit_price:g} is "
+                    f"{abs(order.limit_price / mkt - 1):.0%} from market "
+                    f"{mkt:g} — outside the ±{self.limits.price_band:.0%} "
+                    "fat-finger band")
         notional = order.qty * px
         if notional > self.limits.max_order_notional:
             return (f"order notional {notional:,.0f} exceeds per-order cap "
@@ -301,13 +312,20 @@ class AlpacaBroker(Broker):
     def submit(self, order: Order) -> Order:
         R, side = self._req, self._req["side"]
         s = side.BUY if order.side == "buy" else side.SELL
+        # Alpaca crypto rejects DAY time-in-force ("invalid crypto
+        # time_in_force") — crypto orders must be GTC
+        tif = R["tif"].GTC if "/" in order.symbol else R["tif"].DAY
         req = (R["mkt"](symbol=order.symbol, qty=order.qty, side=s,
-                        time_in_force=R["tif"].DAY) if order.type == "market"
+                        time_in_force=tif) if order.type == "market"
                else R["lim"](symbol=order.symbol, qty=order.qty, side=s,
-                             time_in_force=R["tif"].DAY,
+                             time_in_force=tif,
                              limit_price=order.limit_price))
-        r = self.c.submit_order(req)
-        order.id, order.status = str(r.id), r.status.value
+        try:
+            r = self.c.submit_order(req)
+            order.id, order.status = str(r.id), r.status.value
+        except Exception as e:                 # venue rejection -> clean reject,
+            order.status = "rejected"          # never a 500 to the client
+            order.reason = f"venue: {str(e)[:200]}"
         return order
 
     def cancel(self, order_id: str) -> bool:

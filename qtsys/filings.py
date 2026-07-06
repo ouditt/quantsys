@@ -22,6 +22,7 @@ import time
 import urllib.request
 
 _CACHE: dict = {}
+_CACHE_MAX = 512
 _CIK_TTL = 24 * 3600          # ticker->CIK map is essentially static
 _SUB_TTL = 3600               # submissions refresh hourly
 _TEXT_TTL = 12 * 3600
@@ -55,6 +56,9 @@ def _cached(key: str, ttl: int, fn):
     except Exception:
         val = hit[1] if hit else None
     _CACHE[key] = (now, val)
+    if len(_CACHE) > _CACHE_MAX:              # size-bounded: evict oldest
+        for k in sorted(_CACHE, key=lambda k: _CACHE[k][0])[:len(_CACHE) // 4]:
+            _CACHE.pop(k, None)
     return val
 
 

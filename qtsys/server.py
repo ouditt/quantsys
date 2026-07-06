@@ -369,6 +369,9 @@ async def _news_narrative(sym: str, items: list[dict]) -> str:
     txt = await asyncio.to_thread(nlp.narrative, sym,
                                   [it.get("headline", "") for it in items], llm)
     _NARR_CACHE[sym] = (time.time(), txt)
+    if len(_NARR_CACHE) > 256:                 # size-bounded: evict oldest
+        for k in sorted(_NARR_CACHE, key=lambda k: _NARR_CACHE[k][0])[:64]:
+            _NARR_CACHE.pop(k, None)
     return txt
 
 
@@ -999,7 +1002,7 @@ def orders(open_only: bool = False):
 
 
 @app.post("/api/orders")
-def place(order: dict):
+async def place(order: dict):
     vmap = state.get("vmap")
     vsym = order["symbol"] if vmap is None else vmap.get(order["symbol"])
     if order["symbol"] not in TRADABLE or not vsym:
@@ -1010,7 +1013,9 @@ def place(order: dict):
     o = Order(vsym, order["side"], float(order["qty"]),
               order.get("type", "market"),
               float(order["limit_price"]) if order.get("limit_price") else None)
-    res = state["gw"].submit(o)
+    # gateway does 3-4 broker round-trips (quote/positions/account) — keep the
+    # event loop free while they run
+    res = await asyncio.to_thread(state["gw"].submit, o)
     code = 200 if res.status != "rejected" else 400
     return JSONResponse(res.to_dict(), status_code=code)
 

@@ -15,6 +15,7 @@ import time
 import urllib.request
 
 _CACHE: dict = {}
+_CACHE_MAX = 128
 
 # release-name substrings that matter to markets (FRED names)
 _KEY_RELEASES = (
@@ -37,6 +38,9 @@ def _cached(key, ttl, fn):
     except Exception:
         v = hit[1] if hit else []
     _CACHE[key] = (now, v)
+    if len(_CACHE) > _CACHE_MAX:              # size-bounded: evict oldest
+        for k in sorted(_CACHE, key=lambda k: _CACHE[k][0])[:len(_CACHE) // 4]:
+            _CACHE.pop(k, None)
     return v
 
 

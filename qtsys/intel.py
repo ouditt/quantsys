@@ -25,6 +25,7 @@ import urllib.request
 from .sentiment import score as _sent
 
 _CACHE: dict[str, tuple[float, object]] = {}
+_CACHE_MAX = 512
 FUND_TTL = 6 * 3600          # fundamentals refresh a few times a day
 NEWS_TTL = 300               # yfinance news every 5 min
 MACRO_TTL = 12 * 3600
@@ -40,6 +41,9 @@ def _cached(key: str, ttl: int, fn):
     except Exception:
         val = hit[1] if hit else None
     _CACHE[key] = (now, val)
+    if len(_CACHE) > _CACHE_MAX:              # size-bounded: evict oldest
+        for k in sorted(_CACHE, key=lambda k: _CACHE[k][0])[:len(_CACHE) // 4]:
+            _CACHE.pop(k, None)
     return val
 
 

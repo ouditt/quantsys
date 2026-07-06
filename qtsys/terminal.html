@@ -1676,7 +1676,9 @@ async function loadL2(sym,force){
   if(!force&&now-(S._l2load[sym]||0)<1500)return;              // throttle ~1.5s
   S._l2load[sym]=now;
   try{const r=await j("/api/orderbook?sym="+encodeURIComponent(sym));
-    S.l2[sym]={book:r.book,metrics:r.metrics};}
+    S.l2[sym]={book:r.book,metrics:r.metrics,ts:now};
+    const ks=Object.keys(S.l2);           // size-bounded: keep 12 most recent
+    if(ks.length>12)ks.sort((a,b)=>(S.l2[a].ts||0)-(S.l2[b].ts||0)).slice(0,ks.length-12).forEach(k=>delete S.l2[k]);}
   catch(e){return}
   document.querySelectorAll('.l2live[data-l2sym="'+sym+'"]').forEach(el=>el.innerHTML=renderL2(sym));
 }
