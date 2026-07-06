@@ -41,7 +41,11 @@ def candidate_symbols(broker, watchlist=(), cap: int = 8000) -> list[str]:
                 out.append(a.symbol)
         cr = broker.c.get_all_assets(GetAssetsRequest(
             status=AssetStatus.ACTIVE, asset_class=AssetClass.CRYPTO))
-        out += [a.symbol for a in cr if a.tradable]
+        crypto = [a.symbol for a in cr if a.tradable]
+        # crypto must survive the cap: truncate EQUITIES to make room, never
+        # the (small) crypto set — appending after a full slice silently
+        # dropped every pair when equities exceeded the cap
+        out = out[:max(cap - len(crypto), 0)] + crypto
     except Exception:
         pass
     out = out[:cap]

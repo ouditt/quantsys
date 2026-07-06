@@ -1622,7 +1622,9 @@ function vPlan(){
       <span class="mut">open <b>${a.open??0}/${a.max_concurrent??"—"}</b></span>
       <span class="mut">orders today <b>${a.orders_today??0}/${a.max_orders_day??"—"}</b></span>
       <span class="mut">realized today <b class="${(a.realized_today||0)>=0?"up":"dn"}">${m(a.realized_today)}</b></span>
-      <span class="mut">loss breaker <b>${a.max_daily_loss?(a.max_daily_loss*100).toFixed(0)+"%":"—"}</b></span></div>
+      <span class="mut">loss breaker <b>${a.max_daily_loss?(a.max_daily_loss*100).toFixed(0)+"%":"—"}</b></span>
+      <span class="mut">per-symbol cap <b>${a.max_symbol_pct?(a.max_symbol_pct*100).toFixed(0)+"% eq":"—"}</b></span>
+      <span class="mut" title="distinct paper trading days proven; live stays locked until this reaches the requirement">live unlock <b>${a.paper_days??0}/${a.paper_days_req??60} paper days</b></span></div>
     ${liveWarn?`<div class="note" style="border-color:var(--dn)">Broker is LIVE but QTSYS_AUTOTRADE_LIVE is not set — the engine will refuse to send. This is the safety lock.</div>`:""}
     <table><thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Stop</th><th>Target</th></tr></thead><tbody>${mpos}</tbody></table>
     <div class="note">The auto-trader enters the adopted plan and manages its own TP/SL exits. New intraday opportunities go to the <b>INBOX</b> for your approval, not here. Every order still passes the gateway; the kill switch flattens and disarms.</div></div>`;

@@ -52,8 +52,13 @@ class AutoTrader:
           id INTEGER PRIMARY KEY, plan_date TEXT, symbol TEXT, side TEXT,
           qty REAL, entry REAL, stop REAL, target REAL, order_id TEXT,
           status TEXT, opened_ts REAL, closed_ts REAL, exit_reason TEXT,
-          realized REAL);
+          realized REAL, mode TEXT DEFAULT 'paper');
         CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT);""")
+        try:                                       # migrate pre-mode databases
+            self.db.execute("ALTER TABLE managed ADD COLUMN mode TEXT "
+                            "DEFAULT 'paper'")
+        except Exception:
+            pass
         self.db.commit()
         # armed state persists across restarts; default OFF unless env forces on
         if _env_flag("QTSYS_AUTOTRADE"):
@@ -62,6 +67,11 @@ class AutoTrader:
         self.max_orders_day = int(os.environ.get("QTSYS_AT_MAX_ORDERS", "20"))
         self.max_concurrent = int(os.environ.get("QTSYS_AT_MAX_CONCURRENT", "8"))
         self.max_daily_loss = float(os.environ.get("QTSYS_AT_MAX_DAILY_LOSS", "0.04"))
+        # per-symbol exposure cap, as a fraction of equity (default 10%)
+        self.max_symbol_pct = float(os.environ.get("QTSYS_AT_MAX_SYMBOL_PCT", "0.10"))
+        # live unlock: distinct PAPER trading days required before the engine
+        # will honor QTSYS_AUTOTRADE_LIVE (0 disables the requirement)
+        self.paper_days_req = int(os.environ.get("QTSYS_AT_PAPER_DAYS", "60"))
 
     # ---------------------------------------------------------------- kv/state
     def _get(self, k, d=None):
@@ -81,10 +91,24 @@ class AutoTrader:
         self.log("AutoTrader", f"engine {'ARMED' if on else 'DISARMED'}",
                  "warn" if on else "info")
 
+    def paper_days(self) -> int:
+        """Distinct calendar days on which the engine closed PAPER trades —
+        the live-unlock track record. Days are marked at close time with the
+        account mode, so later live days never inflate the paper count."""
+        r = self.db.execute(
+            "SELECT COUNT(DISTINCT date(closed_ts,'unixepoch')) FROM managed "
+            "WHERE status='closed' AND COALESCE(mode,'paper')='paper'").fetchone()
+        return int(r[0] or 0)
+
     def live_ok(self) -> bool:
-        """True only if it's safe to send: paper always ok; live needs the flag."""
-        paper = getattr(self.broker, "paper", True)
-        return paper or _env_flag("QTSYS_AUTOTRADE_LIVE")
+        """True only if it's safe to send. Paper: always. Live: needs BOTH the
+        explicit env flag AND a proven paper track record (default 60 distinct
+        paper trading days) — one env var alone is not enough to go live."""
+        if getattr(self.broker, "paper", True):
+            return True
+        if not _env_flag("QTSYS_AUTOTRADE_LIVE"):
+            return False
+        return self.paper_days_req <= 0 or self.paper_days() >= self.paper_days_req
 
     def status(self) -> dict:
         return {"enabled": self.enabled, "live_ok": self.live_ok(),
@@ -94,6 +118,9 @@ class AutoTrader:
                 "open": len(self.open_positions()),
                 "max_concurrent": self.max_concurrent,
                 "max_daily_loss": self.max_daily_loss,
+                "max_symbol_pct": self.max_symbol_pct,
+                "paper_days": self.paper_days(),
+                "paper_days_req": self.paper_days_req,
                 "realized_today": round(self._realized_today(), 2),
                 "positions": self.open_positions()}
 
@@ -126,7 +153,10 @@ class AutoTrader:
         if not self.enabled:
             return "engine disarmed"
         if not self.live_ok():
-            return "live keys but QTSYS_AUTOTRADE_LIVE not set — refusing"
+            if not _env_flag("QTSYS_AUTOTRADE_LIVE"):
+                return "live keys but QTSYS_AUTOTRADE_LIVE not set — refusing"
+            return (f"live locked: {self.paper_days()}/{self.paper_days_req} "
+                    "paper trading days proven — keep running on paper")
         if getattr(self.gw, "halted", False):
             return "kill switch active"
         eq = 0.0
@@ -154,6 +184,15 @@ class AutoTrader:
             return {"executed": 0, "blocked": blk}
         done, skipped = 0, []
         existing = {p["symbol"] for p in self.open_positions()}
+        try:
+            equity = float(self.broker.get_account().get("equity") or 0)
+        except Exception:
+            equity = 0.0
+        sym_cap = equity * self.max_symbol_pct if equity else None
+        exposure = {}                               # managed notional per symbol
+        for p in self.open_positions():
+            exposure[p["symbol"]] = (exposure.get(p["symbol"], 0.0)
+                                     + abs(p["qty"] * p["entry"]))
         for idea in plan.get("ideas", []):
             sym = idea["symbol"]
             if sym in existing:
@@ -165,6 +204,11 @@ class AutoTrader:
                 skipped.append((sym, "max concurrent")); continue
             if not idea.get("qty") or not idea.get("stop") or not idea.get("target"):
                 skipped.append((sym, "unsized")); continue
+            want = abs(float(idea.get("notional") or 0))
+            if sym_cap and exposure.get(sym, 0.0) + want > sym_cap:
+                skipped.append((sym, f"per-symbol cap: {exposure.get(sym, 0.0) + want:,.0f}"
+                                f" > {self.max_symbol_pct:.0%} of equity"))
+                continue
             side = "buy" if idea["side"] in ("LONG", "buy") else "sell"
             o = Order(self._venue(sym), side, float(idea["qty"]), "market", None)
             res = self.gw.submit(o)
@@ -173,12 +217,14 @@ class AutoTrader:
                 skipped.append((sym, f"gateway: {res.reason}")); continue
             self.db.execute(
                 "INSERT INTO managed(plan_date,symbol,side,qty,entry,stop,target,"
-                "order_id,status,opened_ts,realized) VALUES (?,?,?,?,?,?,?,?, "
-                "'open', ?, 0)",
+                "order_id,status,opened_ts,realized,mode) VALUES (?,?,?,?,?,?,?,?, "
+                "'open', ?, 0, ?)",
                 (plan.get("date", self._today()), sym, side, float(idea["qty"]),
                  idea["entry"], idea["stop"], idea["target"], res.id or "",
-                 time.time()))
+                 time.time(),
+                 "paper" if getattr(self.broker, "paper", True) else "live"))
             self.db.commit()
+            exposure[sym] = exposure.get(sym, 0.0) + want
             done += 1
             self.log("AutoTrader",
                      f"ENTERED {side.upper()} {idea['qty']} {sym} @~{idea['entry']} "
@@ -284,12 +330,38 @@ def _selftest():
     at.broker.px["AAPL"] = 193.0
     at.monitor()
     assert at._realized_today() < 130, "stop close booked the loss"      # net of the win
-    # live-safety gate: a live broker without the flag refuses
+    # per-symbol exposure cap: 10% of 100k equity = 10k; a 20k idea is blocked
+    big = {"date": at._today(), "ideas": [
+        {"symbol": "MSFT", "side": "LONG", "qty": 100, "entry": 200.0,
+         "stop": 194.0, "target": 212.0, "notional": 20000.0}]}
+    r = at.execute_plan(big)
+    assert r["executed"] == 0 and "per-symbol cap" in r["skipped"][0][1], r
+    # live-safety gate 1: a live broker without the flag refuses
     at.broker.paper = False
     os.environ.pop("QTSYS_AUTOTRADE_LIVE", None)
     assert at.execute_plan(plan)["blocked"].startswith("live keys"), "live gate"
+    # live-safety gate 2: flag set but paper record short -> still locked
+    os.environ["QTSYS_AUTOTRADE_LIVE"] = "1"
+    at.paper_days_req = 3
+    assert "live locked" in at.execute_plan(plan)["blocked"], "paper-days lock"
+    # accrue 3 distinct PAPER days (plus a LIVE day that must NOT count)
+    for d in range(4):
+        at.db.execute("INSERT INTO managed(plan_date,symbol,side,qty,entry,stop,"
+                      "target,order_id,status,opened_ts,closed_ts,exit_reason,"
+                      "realized,mode) VALUES ('x','T','buy',1,1,1,1,'','closed',"
+                      "?,?,'target',1,?)",
+                      (0, 86400 * (d + 1) + 60, "live" if d == 3 else "paper"))
+    at.db.commit()
+    # 3 synthetic paper days + today's own TP/SL closes = 4; the LIVE row
+    # would make 5 if it (wrongly) counted
+    assert at.paper_days() == 4, f"live day must not count: {at.paper_days()}"
+    assert at.live_ok(), "paper days >= req + flag -> live unlocked"
+    at.paper_days_req = 60
+    assert not at.live_ok(), "60-day requirement re-locks"
+    os.environ.pop("QTSYS_AUTOTRADE_LIVE", None)
     print("autotrader self-test ✓  disarmed default, enter->TP profit->SL loss, "
-          "gateway routed, live-without-flag refused")
+          "gateway routed, per-symbol cap, live-without-flag refused, "
+          "60-paper-day lock (live days excluded)")
 
 
 if __name__ == "__main__":
