@@ -757,6 +757,16 @@ def _build_chain(broker, sym, exp) -> dict:
             "smiles": smiles}
 
 
+@app.get("/api/options/{sym}/strategy")
+async def options_strategy(sym: str, preset: str = "straddle"):
+    """Multi-leg options structure around the money: payoff, greeks, risk."""
+    chain = await options_chain(sym, "")
+    from . import optstrat
+    st = optstrat.build(chain.get("chain") or [], chain.get("spot"), preset)
+    return {"underlying": sym.upper(), "expiration": chain.get("expiration"),
+            "presets": list(optstrat.PRESETS), "strategy": st}
+
+
 @app.get("/api/industry")
 async def industry(sym: str):
     """Sector of `sym` + its constituents, each with LIVE % change (computed in

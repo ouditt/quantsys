@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT))
 SELFTEST_MODULES = [
     "qtsys.options", "qtsys.volsurface", "qtsys.execalgo", "qtsys.pit",
     "qtsys.portfolio_risk", "qtsys.arb.pairs", "qtsys.arb.triangular",
-    "qtsys.arb.cip",
+    "qtsys.arb.cip", "qtsys.optstrat", "qtsys.proposals",
 ]
 NETWORK_OK_TO_SKIP = {"qtsys.portfolio_risk"}   # needs bundled data refresh
 

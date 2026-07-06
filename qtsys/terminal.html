@@ -1214,12 +1214,67 @@ function vOptions(){
     ${cur?`<span class="chip">ATM ${iv(cur.atm_vol)}</span><span class="chip ${cur.rr25<0?"dn":"up"}">RR25 ${cur.rr25==null?"—":(cur.rr25*100).toFixed(2)}</span>`:""}
     <span class="chip" data-sym="${esc(d.underlying)}" style="cursor:pointer">chart ↗</span></div>
   ${sfRow}
+  ${vOptStrat(d)}
   <div class="panel"><div class="ph">Chain <span class="right">${expSeg}</span></div>
     <div style="overflow-x:auto;max-height:60vh"><table class="opt"><thead>
       <tr><th colspan="6" style="text-align:center;color:var(--up)">CALLS</th><th>Strike</th><th colspan="6" style="text-align:center;color:var(--dn)">PUTS</th></tr>
       <tr><th>Bid</th><th>Ask</th><th>Last</th><th>IV</th><th>Δ</th><th>OI</th><th></th><th>Bid</th><th>Ask</th><th>Last</th><th>IV</th><th>Δ</th><th>OI</th></tr>
     </thead><tbody>${rows}</tbody></table></div>
     <div class="note">Live Alpaca chain. IV is read from the <b>no-arbitrage SVI surface</b> (fitted to quality-gated OTM quotes via American-binomial inversion with the parity-implied carry) — deep-ITM strikes price cleanly where a raw mid inversion is ill-posed. Greeks off surface vol. Click a strike to open that contract.</div></div>`;
+}
+const OPTSTRAT_PRESETS=[["straddle","Straddle"],["strangle","Strangle"],
+  ["long_call","Long call"],["long_put","Long put"],["bull_call","Bull call"],
+  ["bear_put","Bear put"],["iron_condor","Iron condor"]];
+function vOptStrat(d){
+  const cur=S.optStratPreset||"straddle";
+  const seg=OPTSTRAT_PRESETS.map(([v,l])=>`<button data-optstrat="${v}" class="${cur===v?"on":""}">${l}</button>`).join("");
+  const s=S.optStrat;
+  let body;
+  if(S.optStratFor!==d.underlying+"|"+cur||!s)body=`<div class="pb mut">building ${cur.replace("_"," ")}…</div>`;
+  else if(!s.strategy)body=`<div class="pb mut">can't build ${cur.replace("_"," ")} — strikes not two-sided-quotable on this expiry</div>`;
+  else{const t=s.strategy,nn=(x,g=2)=>x==null?"—":(+x).toFixed(g),m=x=>x==null?"—":(x>=0?"$":"-$")+Math.abs(x).toFixed(0);
+    const legs=t.legs.map(l=>`<span class="pill ${l.qty>0?"up":"dn"}">${l.qty>0?"+":""}${l.qty} ${l.right} ${nn(l.strike)}</span>`).join(" ");
+    const be=t.breakevens.length?t.breakevens.map(b=>nn(b)).join(" / "):"—";
+    body=`<div class="pb">
+      <div style="margin-bottom:6px">${legs}</div>
+      <div class="grid3">
+        <div class="stat"><div class="k">Net ${t.kind}</div><div class="v num">${m(Math.abs(t.net_cost))}</div></div>
+        <div class="stat"><div class="k">Max profit</div><div class="v num up">${t.max_profit>1e6?"unlimited":m(t.max_profit)}</div></div>
+        <div class="stat"><div class="k">Max loss</div><div class="v num dn">${t.max_loss<-1e6?"unlimited":m(t.max_loss)}</div></div>
+        <div class="stat"><div class="k">Breakeven</div><div class="v num">${be}</div></div>
+        <div class="stat"><div class="k">Net Δ / Γ</div><div class="v num">${nn(t.greeks.delta,2)} / ${nn(t.greeks.gamma,3)}</div></div>
+        <div class="stat"><div class="k">Net Θ / V</div><div class="v num">${nn(t.greeks.theta,2)} / ${nn(t.greeks.vega,2)}</div></div>
+      </div>
+      <canvas id="payoffcv" style="width:100%;height:180px;display:block;margin-top:8px"></canvas>
+      <div class="mut" style="font-size:10px;text-align:center;margin-top:3px">P&L at expiry vs underlying · dashed = spot ${nn(t.spot)} · zero line marked</div>
+    </div>`;}
+  return `<div class="panel"><div class="ph">Strategy builder <span class="right"><span class="seg">${seg}</span></span></div>${body}
+    <div class="note">Structures built around the money from the live surface-priced chain. Payoff is at expiry; greeks are current net position greeks. Legs are analysis — route them individually through the ticket.</div></div>`;
+}
+function drawPayoff(){
+  const cv=$("#payoffcv"),t=S.optStrat&&S.optStrat.strategy;if(!cv||!t||!t.payoff.length)return;
+  const dpr=devicePixelRatio||1,W=cv.clientWidth||600,H=cv.clientHeight||180;
+  cv.width=W*dpr;cv.height=H*dpr;const x=cv.getContext("2d");x.scale(dpr,dpr);
+  const P=t.payoff,xs=P.map(p=>p[0]),ys=P.map(p=>p[1]);
+  const xlo=xs[0],xhi=xs[xs.length-1],ylo=Math.min(...ys,0),yhi=Math.max(...ys,0),ysp=(yhi-ylo)||1;
+  const L=46,R=8,T=8,B=18,pw=W-L-R,ph=H-T-B;
+  const X=v=>L+(v-xlo)/(xhi-xlo)*pw,Y=v=>T+ph-(v-ylo)/ysp*ph;
+  x.strokeStyle="#1c2733";x.fillStyle="#5b6b7d";x.font="10px ui-monospace,monospace";
+  const y0=Y(0);x.strokeStyle="#33404f";x.beginPath();x.moveTo(L,y0);x.lineTo(W-R,y0);x.stroke();
+  x.fillText("$0",4,y0+3);x.fillText("$"+yhi.toFixed(0),4,Y(yhi)+8);x.fillText("$"+ylo.toFixed(0),4,Y(ylo)-2);
+  for(let i=0;i<=4;i++){const v=xlo+(xhi-xlo)*i/4;x.fillText(v.toFixed(0),X(v)-10,H-5);}
+  x.strokeStyle="#3a2f16";x.setLineDash([4,3]);x.beginPath();x.moveTo(X(t.spot),T);x.lineTo(X(t.spot),T+ph);x.stroke();x.setLineDash([]);
+  // profit (green) above zero, loss (red) below — draw as two-color line
+  for(let i=1;i<P.length;i++){x.beginPath();x.moveTo(X(xs[i-1]),Y(ys[i-1]));x.lineTo(X(xs[i]),Y(ys[i]));
+    x.strokeStyle=(ys[i-1]+ys[i])/2>=0?"#27d17f":"#ff5063";x.lineWidth=1.7;x.stroke();}
+}
+async function loadOptStrat(sym,preset){
+  S.optStratPreset=preset;const key=sym+"|"+preset;
+  if(S.optStratFor===key)return;
+  try{const r=await j("/api/options/"+encodeURIComponent(sym)+"/strategy?preset="+preset);
+    S.optStrat=r;S.optStratFor=key;}
+  catch(e){S.optStrat={strategy:null};S.optStratFor=key;}
+  if(S.page==="options")render();
 }
 function drawSmiles(){
   const cv=$("#smilecv"),d=S.options;
@@ -2118,7 +2173,10 @@ function render(scroll){
   $$("canvas.spark").forEach(cv=>{const s=cv.dataset.spark,q=S.quotes[s];
     drawSpark(cv,q.spark,q.spark.at(-1)>=q.spark[0])});
   if(S.page==="industry")drawPie();
-  if(S.page==="options")drawSmiles();
+  if(S.page==="options"){drawSmiles();drawPayoff();
+    if(S.options&&S.options.underlying)loadOptStrat(S.options.underlying,S.optStratPreset||"straddle");
+    $$("[data-optstrat]").forEach(b=>b.onclick=()=>{S.optStratFor=null;loadOptStrat(S.options.underlying,b.dataset.optstrat)});
+  }
   if(S.page==="security"){drawChart(S.sym);
     loadNews(S.sym);loadFund(S.sym);loadFilings(S.sym);
     if((META[S.sym]||{}).cls==="Crypto")loadL2(S.sym,true);
