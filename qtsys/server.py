@@ -20,7 +20,7 @@ from .brokers import ExecutionGateway, Order, PaperBroker, RiskLimits
 from .data import load_real
 
 try:
-    from fastapi import FastAPI, HTTPException
+    from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, JSONResponse
 except ImportError as e:                                   # pragma: no cover
@@ -295,6 +295,38 @@ def health(): return {"ok": True, "mode": "live",
 
 @app.get("/api/quotes")
 def quotes(): return [_quote_row(s) for s in state["hist"]]
+
+
+@app.websocket("/ws")
+async def ws_stream(ws: WebSocket):
+    """Server-push stream of quotes + account, once a second. Replaces the
+    client's high-frequency polling (one connection instead of a full
+    re-fetch per second); the terminal falls back to polling if it drops.
+    Token via query param — browsers can't set WS headers, and same-origin
+    JS is the only place the token is exposed."""
+    if ws.query_params.get("t") != SESSION_TOKEN:
+        await ws.close(code=1008)
+        return
+    await ws.accept()
+    acct_i = 0
+    try:
+        while True:
+            payload = {"quotes": [_quote_row(s) for s in state["hist"]],
+                       "halted": state["gw"].halted}
+            if acct_i % 3 == 0:                    # account every ~3s
+                try:
+                    payload["account"] = await asyncio.to_thread(
+                        lambda: {**state["broker"].get_account(),
+                                 "halted": state["gw"].halted})
+                except Exception:
+                    pass
+            acct_i += 1
+            await ws.send_json(payload)
+            await asyncio.sleep(1)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
 
 
 @app.get("/api/history/{sym}")

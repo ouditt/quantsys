@@ -720,7 +720,24 @@ async function setGran(g){
   }
   render();
 }
+function connectWS(){
+  if(S.mode!=="live"||!window.QTSYS_TOKEN)return;
+  try{
+    const url=location.origin.replace(/^http/,"ws")+"/ws?t="+encodeURIComponent(window.QTSYS_TOKEN);
+    const ws=new WebSocket(url);S._ws=ws;
+    ws.onopen=()=>{S._wsOk=true;};
+    ws.onmessage=(ev)=>{try{const d=JSON.parse(ev.data);
+      if(d.quotes)d.quotes.forEach(q=>{const o=S.quotes[q.symbol]||{};o.last=q.last;o.prevClose=q.last-q.chg;if(q.spark)o.spark=q.spark;S.quotes[q.symbol]=o;});
+      if(d.account){Object.assign(S.account,d.account);S.halted=!!d.account.halted;}
+      if(d.halted!==undefined)S.halted=d.halted;
+      S._lastOk=Date.now();lightRepaint();
+    }catch(e){}};
+    ws.onclose=()=>{S._wsOk=false;setTimeout(connectWS,3000);};   // auto-reconnect
+    ws.onerror=()=>{try{ws.close()}catch(e){}};
+  }catch(e){S._wsOk=false;}
+}
 async function fastTick(){
+  if(S._wsOk)return;                        // WS drives quotes; poll only as fallback
   if(S.mode!=="live"||S.page!=="security"||!S.sym)return;
   const s=S.sym;
   // second-by-second last trade for the symbol being watched
@@ -2410,7 +2427,8 @@ function routeFromHash(initial){
     setInterval(async()=>{await liveRefresh();lightRepaint();
       if(["agents","portfolio","risk"].includes(S.page)
         &&document.activeElement.tagName!=="INPUT")render()},2000);
-    setInterval(fastTick,1000);   // second-by-second on the watched symbol
+    setInterval(fastTick,1000);   // second-by-second on the watched symbol (WS fallback)
+    connectWS();                  // server-push quotes+account (falls back to polling)
     pollInbox();setInterval(pollInbox,20000);   // proposal inbox + tab badge
   }
 })();
