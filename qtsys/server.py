@@ -244,6 +244,7 @@ async def boot() -> None:
     asyncio.create_task(_prewarm_screener())     # warm the fundamentals cache
     asyncio.create_task(_alerts_loop())          # evaluate alerts continuously
     asyncio.create_task(_autotrader_loop())      # TP/SL monitor for auto-trades
+    asyncio.create_task(_intraday_scan_loop())   # live intraday opportunities -> INBOX
 
 
 async def _tick_loop() -> None:
@@ -1365,6 +1366,111 @@ def _build_and_adopt_plan(execute: bool = False) -> dict:
     return plan
 
 
+def _intraday_watch(cap: int = 40) -> list[str]:
+    """The narrowed set the intraday scan focuses on: the day's plan symbols +
+    top daily-scan setups + held positions (the ML-shortlist proxy). Full
+    minute-scanning of all ~11k names isn't feasible on free data, so this is
+    where the resolution goes."""
+    from . import universe
+    syms = []
+    p = state["planstore"].latest() if state.get("planstore") else None
+    if p:
+        syms += [i["symbol"] for i in p.get("ideas", [])]
+    top = (universe.load_last_result("1Day") or {}).get("setups", [])
+    syms += [s["asset"] for s in top[:30]]
+    try:
+        for pos in state["broker"].get_positions():
+            syms.append(pos.symbol)
+    except Exception:
+        pass
+    import re
+    _opt = re.compile(r"^[A-Z]{1,6}\d{6}[CP]\d{8}$")   # OCC option symbol
+    vmap = state.get("vmap") or {}
+    out, seen = [], set()
+    for s in syms:
+        v = vmap.get(s, s)                       # scan on the venue symbol
+        if (v and v not in seen and "/" not in v # equities only intraday (fast)
+                and not _opt.match(v)            # options have no stock-bar feed
+                and v.replace(".", "").isalpha()):
+            seen.add(v)
+            out.append(v)
+    return out[:cap]
+
+
+def _intraday_scan(broker, syms, tf) -> list[dict]:
+    from . import universe
+    bars = universe.fetch_bars(broker, syms, n=200, tf=tf)
+    setups, _, _ = universe.scan_universe(bars, fresh_bars=2)
+    for s in setups:
+        s["tf"] = tf
+    return setups
+
+
+def _file_intraday_proposals(setups, tf) -> int:
+    """Fresh intraday signals -> INBOX (new opportunities need approval, per
+    the operator's choice — NOT auto-traded)."""
+    daemon = state.get("daemon")
+    if not daemon or not setups:
+        return 0
+    plan = state["planstore"].latest() if state.get("planstore") else None
+    in_plan = {i["symbol"] for i in (plan or {}).get("ideas", [])}
+    n = 0
+    for s in setups[:6]:                          # cap the drip
+        sym = s["asset"]
+        if sym in in_plan:
+            continue
+        side = "buy" if s.get("side") in ("LONG", "buy") else "sell"
+        exp = s.get("hist_exp")
+        daemon.propose(
+            "Intraday Scan", "intraday",
+            f"{s['side']} {sym} · fresh {tf} {s.get('family', '')} signal"
+            + (f" (hist exp {exp:+.2%})" if isinstance(exp, (int, float)) else ""),
+            symbol=sym, side=side, dedup=f"intra:{sym}:{s.get('strategy')}",
+            ttl=6 * 3600)
+        n += 1
+    return n
+
+
+async def _intraday_scan_loop():
+    """React to markets live: rescan the narrowed watch intraday and drip fresh
+    opportunities into the INBOX for approval. Off unless equities are open."""
+    await asyncio.sleep(180)
+    every = int(os.environ.get("QTSYS_INTRADAY_SECS", "1200"))   # 20 min
+    tf = os.environ.get("QTSYS_INTRADAY_TF", "15Min")
+    broker = state.get("broker")
+    if not hasattr(broker, "history"):
+        return
+    while True:
+        try:
+            if _eq_open() and not state.get("uscan", {}).get("running"):
+                syms = _intraday_watch()
+                if syms:
+                    setups = await asyncio.to_thread(_intraday_scan, broker, syms, tf)
+                    n = _file_intraday_proposals(setups, tf)
+                    if n:
+                        state["daemon"].log("Intraday Scan",
+                                            f"{n} fresh {tf} opportunities -> INBOX",
+                                            "info")
+        except Exception:
+            pass
+        await asyncio.sleep(every)
+
+
+def _eq_open() -> bool:
+    """US equity RTH (approx, ET) — gate the intraday equity scan."""
+    import datetime
+    now = datetime.datetime.utcnow()
+    et = now - datetime.timedelta(hours=4 if _is_edt(now) else 5)
+    if et.weekday() >= 5:
+        return False
+    mins = et.hour * 60 + et.minute
+    return 9 * 60 + 30 <= mins <= 16 * 60
+
+
+def _is_edt(dt) -> bool:                          # rough US DST window
+    return 3 <= dt.month <= 11
+
+
 async def _autotrader_loop():
     """TP/SL monitor for the auto-trader's managed positions."""
     await asyncio.sleep(30)
@@ -1389,6 +1495,20 @@ def plan_get():
 async def plan_build(body: dict | None = None):
     execute = bool((body or {}).get("execute"))
     return await asyncio.to_thread(_build_and_adopt_plan, execute)
+
+
+@app.post("/api/scan/intraday")
+async def scan_intraday_now(body: dict | None = None):
+    """Run one intraday scan over the narrowed watch now (ignores market
+    hours) and drip fresh opportunities to the INBOX. Manual trigger."""
+    tf = (body or {}).get("tf") or os.environ.get("QTSYS_INTRADAY_TF", "15Min")
+    broker = state["broker"]
+    syms = await asyncio.to_thread(_intraday_watch)
+    if not syms:
+        return {"scanned": 0, "filed": 0, "note": "no watch symbols"}
+    setups = await asyncio.to_thread(_intraday_scan, broker, syms, tf)
+    filed = _file_intraday_proposals(setups, tf)
+    return {"scanned": len(syms), "setups": len(setups), "filed": filed, "tf": tf}
 
 
 @app.get("/api/autotrader")
