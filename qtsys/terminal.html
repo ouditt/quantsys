@@ -941,7 +941,7 @@ async function toggleAgent(name,enabled){
 }
 
 /* ============================================================ views */
-const TABS=[["markets","MKT"],["launch","LAUNCH"],["portfolio","PORT"],["risk","RISK"],["calendar","CAL"],["screen","SCREEN"],["alerts","ALERTS"],["inbox","INBOX"],["agents","AGENTS"],["strats","STRAT"],["universe","UNIVERSE"],["data","DATA"],["audit","AUDIT"],["journal","JOURNAL"]];
+const TABS=[["markets","MKT"],["launch","LAUNCH"],["plan","PLAN"],["portfolio","PORT"],["risk","RISK"],["calendar","CAL"],["screen","SCREEN"],["alerts","ALERTS"],["inbox","INBOX"],["agents","AGENTS"],["strats","STRAT"],["universe","UNIVERSE"],["data","DATA"],["audit","AUDIT"],["journal","JOURNAL"]];
 function nav(page,sym){S.page=page;S.sym=sym??S.sym;
   location.hash=page==="security"?`/sec/${S.sym}`:`/${page}`;
   render();$("#view").scrollTop=0}
@@ -1604,6 +1604,54 @@ async function promoteProposal(pid,sym,side){
   S.ticket={side:side||"buy",type:"market"};
   if(S.page==="security")render();
 }
+function vPlan(){
+  const p=S.plan||{ideas:[],critiques:[],status:"none"},a=S.autotrader||{};
+  const nn=(x,d=2)=>x==null?"—":(+x).toFixed(d),m=x=>x==null?"—":"$"+(+x).toFixed(0);
+  // ---- auto-trader control panel ----
+  const armed=a.enabled;
+  const liveWarn=a.paper===false&&!a.live_ok;
+  const atChip=armed?`<span class="pill dn">● AUTO-TRADER ARMED</span>`:`<span class="pill">○ auto-trader disarmed</span>`;
+  const modeChip=a.paper===false?`<span class="pill ${a.live_ok?"dn":""}">${a.live_ok?"LIVE":"LIVE (locked)"}</span>`:`<span class="pill up">PAPER</span>`;
+  const mpos=(a.positions||[]).map(x=>`<tr class="rowlink" data-resolve="${esc(x.symbol)}"><td><span class="sym">${esc(x.symbol)}</span></td>
+    <td class="${x.side==="buy"?"up":"dn"}">${x.side}</td><td class="num">${nn(x.qty,4)}</td>
+    <td class="num">${nn(x.entry)}</td><td class="num dn">${nn(x.stop)}</td><td class="num up">${nn(x.target)}</td></tr>`).join("")
+    ||`<tr><td colspan="6" class="mut">no auto-managed positions</td></tr>`;
+  const ctrl=`<div class="panel"><div class="ph">Auto-trader ${atChip} ${modeChip}
+    <span class="right"><button class="btn ${armed?"danger":"primary"}" id="atToggle">${armed?"DISARM":"ARM"}</button></span></div>
+    <div class="pb" style="display:flex;gap:16px;flex-wrap:wrap;font-size:11px">
+      <span class="mut">open <b>${a.open??0}/${a.max_concurrent??"—"}</b></span>
+      <span class="mut">orders today <b>${a.orders_today??0}/${a.max_orders_day??"—"}</b></span>
+      <span class="mut">realized today <b class="${(a.realized_today||0)>=0?"up":"dn"}">${m(a.realized_today)}</b></span>
+      <span class="mut">loss breaker <b>${a.max_daily_loss?(a.max_daily_loss*100).toFixed(0)+"%":"—"}</b></span></div>
+    ${liveWarn?`<div class="note" style="border-color:var(--dn)">Broker is LIVE but QTSYS_AUTOTRADE_LIVE is not set — the engine will refuse to send. This is the safety lock.</div>`:""}
+    <table><thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Stop</th><th>Target</th></tr></thead><tbody>${mpos}</tbody></table>
+    <div class="note">The auto-trader enters the adopted plan and manages its own TP/SL exits. New intraday opportunities go to the <b>INBOX</b> for your approval, not here. Every order still passes the gateway; the kill switch flattens and disarms.</div></div>`;
+  // ---- the plan ----
+  const badge=t=>{const M={half_size:["½ size","warn"],earnings_flag:["earnings","warn"],liquidity_flag:["thin","dn"]};
+    return Object.keys(M).filter(k=>t[k]).map(k=>`<span class="pill ${M[k][1]}" style="font-size:9px">${M[k][0]}</span>`).join(" ")};
+  const rows=(p.ideas||[]).map(i=>`<tr class="rowlink" data-resolve="${esc(i.symbol)}">
+    <td><span class="pill ${i.side==="LONG"?"up":"dn"}">${i.side}</span></td>
+    <td><span class="sym">${esc(i.symbol)}</span> ${badge(i)}</td>
+    <td class="num">${nn(i.entry)}</td><td class="num dn">${nn(i.stop)}</td><td class="num up">${nn(i.target)}</td>
+    <td class="num">${nn(i.qty,4)}</td><td class="num">${m(i.notional)}</td>
+    <td class="mut" style="font-size:10.5px">${esc(i.strategy)} · ${esc(i.rationale||"")}</td></tr>`).join("")
+    ||`<tr><td colspan="8" class="mut">No plan yet — click Build to draft the day's plan from the morning scan.</td></tr>`;
+  const crit=(p.critiques||[]).map(c=>`<div class="logline"><span class="t" style="min-width:120px"><b>${esc(c.agent)}</b></span>
+    <span class="m">${(c.notes||[]).map(esc).join("<br>")}</span></div>`).join("")
+    ||`<div class="pb mut">no deliberation yet</div>`;
+  return `
+  ${ctrl}
+  <div class="panel"><div class="ph">Daily plan ${p.date?"· "+esc(p.date):""}
+    <span class="right"><span class="mut">${(p.ideas||[]).length} ideas${p.dropped?" · "+p.dropped+" dropped in review":""}${p.posture?" · "+esc(p.posture):""}</span>
+      &nbsp; <button class="btn tiny" id="planBuild">Build / rebuild</button>
+      <button class="btn tiny primary" id="planExec"${p.status!=="adopted"?" disabled":""}>Execute now</button></span></div>
+    ${p.notes?`<div class="pb" style="border-bottom:1px dashed var(--line);font-size:11.5px;line-height:1.6"><span class="pill" style="border-color:var(--amber);color:var(--amber)">PM</span> ${esc(p.notes)}</div>`:""}
+    <div style="overflow-x:auto"><table><thead><tr><th>Side</th><th>Instrument</th><th>Entry</th><th>Stop</th><th>Target</th><th>Qty</th><th>Notional</th><th>Thesis</th></tr></thead><tbody>${rows}</tbody></table></div></div>
+  <div class="panel"><div class="ph">Desk deliberation <span class="right mut">one-round role review</span></div>
+    <div class="pb">${crit}</div></div>`;
+}
+async function pollPlan(){try{const[p,a]=await Promise.all([j("/api/plan"),j("/api/autotrader")]);
+  S.plan=p;S.autotrader=a;if(S.page==="plan")render();}catch(e){}}
 async function pollInbox(){try{S.inbox=await j("/api/proposals");if(S.page==="inbox")render();
   const n=(S.inbox.proposals||[]).length;const t=$$('[data-nav="inbox"]');
   t.forEach(b=>{b.textContent=n?`INBOX ${n}`:"INBOX";b.classList.toggle("hasnew",n>0)});}catch(e){}}
@@ -2165,7 +2213,7 @@ function fxOpen(){const d=new Date(),u=d.getUTCDay(),h=d.getUTCHours();
 
 /* ============================================================ render */
 const VIEWS={markets:vMarkets,security:vSecurity,portfolio:vPortfolio,
-  risk:vRisk,agents:vAgents,strats:vStrats,universe:vUniverse,audit:vAudit,journal:vJournals,industry:vIndustry,options:vOptions,calendar:vCalendar,screen:vScreen,alerts:vAlerts,data:vData,launch:vLaunch,inbox:vInbox};
+  risk:vRisk,agents:vAgents,strats:vStrats,universe:vUniverse,audit:vAudit,journal:vJournals,industry:vIndustry,options:vOptions,calendar:vCalendar,screen:vScreen,alerts:vAlerts,data:vData,launch:vLaunch,inbox:vInbox,plan:vPlan};
 function render(scroll){
   // header
   $("#modechip").className="chip "+(S.mode==="live"?"live":"demo");
@@ -2251,6 +2299,19 @@ function render(scroll){
     const ut=$("#uTrain");if(ut)ut.onclick=async()=>{toast("retraining selector…");
       try{S.uni.selector=await j("/api/universe/train",{method:"POST"});render();
         toast("selector: "+(S.uni.selector.phase||"?"),"ok")}catch(e){toast("train failed","err")}};
+  }
+  if(S.page==="plan"){
+    const pb=$("#planBuild");if(pb)pb.onclick=async()=>{pb.disabled=true;pb.textContent="building…";
+      try{S.plan=await j("/api/plan/build",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});toast("plan adopted","ok")}
+      catch(e){toast("build failed","err")}pollPlan();render()};
+    const pe=$("#planExec");if(pe)pe.onclick=()=>confirmBox("Execute plan",
+      "Sends the adopted plan's entries to the venue through the gateway, and manages their TP/SL automatically. Arm the auto-trader first if it's disarmed.","EXECUTE",async()=>{
+      try{const r=await j("/api/plan/execute",{method:"POST"});toast(`entered ${r.executed}, skipped ${(r.skipped||[]).length}`,"ok");pollPlan()}
+      catch(e){toast(e.detail||"execute failed","err")}});
+    const at=$("#atToggle");if(at)at.onclick=()=>{const arming=!(S.autotrader&&S.autotrader.enabled);
+      const go=async()=>{try{S.autotrader=await j("/api/autotrader/toggle",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:arming})});
+        toast("auto-trader "+(arming?"ARMED":"disarmed"),arming?"warn":"ok");render()}catch(e){toast("toggle failed","err")}};
+      if(arming)confirmBox("Arm auto-trader","Arming lets the engine place and manage LIVE (paper) orders from the adopted plan automatically, within the guardrails. TP/SL exits fire on their own.","ARM",go);else go()};
   }
   if(S.page==="launch")lpBind();
   if(S.page==="data"){
@@ -2430,6 +2491,7 @@ function routeFromHash(initial){
     setInterval(fastTick,1000);   // second-by-second on the watched symbol (WS fallback)
     connectWS();                  // server-push quotes+account (falls back to polling)
     pollInbox();setInterval(pollInbox,20000);   // proposal inbox + tab badge
+    pollPlan();setInterval(pollPlan,15000);     // daily plan + auto-trader status
   }
 })();
 </script>
