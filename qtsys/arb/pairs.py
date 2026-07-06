@@ -105,8 +105,10 @@ def backtest(y: np.ndarray, x: np.ndarray, entry: float = 2.0,
     """Train/test-split spread backtest on LOG prices. Fits (beta, mu, sigma)
     on train only; trades the test window. PnL is per unit gross notional of
     the spread; each round trip pays 4 legs of fees."""
-    y, x = np.log(np.asarray(y, float)), np.log(np.asarray(x, float))
-    n = len(y)
+    y, x = np.asarray(y, float), np.asarray(x, float)
+    m = min(len(y), len(x))                       # align tails (unequal history)
+    y, x = np.log(y[-m:]), np.log(x[-m:])
+    n = m
     cut = int(n * train_frac)
     if cut < 60 or n - cut < 40:
         return {"n_trades": 0, "note": "too little data"}

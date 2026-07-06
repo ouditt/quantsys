@@ -400,7 +400,9 @@ class AgentDaemon:
         px = {}
         for s in self._ARB_SYMS:
             try:
-                px[s] = load_real(s)["close"].to_numpy()[-1500:]
+                # full available history (decades) — the DSR gate needs enough
+                # out-of-sample trades to verify; capped at 6000 bars for speed
+                px[s] = load_real(s)["close"].to_numpy()[-6000:]
             except Exception:
                 continue
         gs = pairs.gated_scan(px)               # cointegration -> OOS bt -> DSR
