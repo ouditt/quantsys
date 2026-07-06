@@ -18,3 +18,5 @@ qtsys/universe_cache/
 qtsys/registry_results*.csv
 # agent-generated briefings/reports — regenerated on demand, not source
 qtsys/reports/
+# state-migration bundles contain broker keys — never commit
+qtsys-state-*.tar.gz

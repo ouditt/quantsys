@@ -1,8 +1,11 @@
-# QTSYS pinned dependencies — the exact versions the live deploy runs.
-# pip install -r requirements.txt   (Python 3.12+)
+# QTSYS pinned dependencies — portable base (Linux + macOS).
+# pip install -r requirements.txt        (Python 3.12+)
+# FinBERT sentiment is optional: see requirements-ml.txt (falls back to the
+# built-in lexicon scorer when transformers/torch are absent).
 fastapi==0.139.0
 uvicorn==0.49.0
 pydantic==2.13.4
+websockets==16.0
 alpaca-py==0.43.5
 numpy==2.5.0
 pandas==3.0.3
@@ -10,6 +13,3 @@ scipy==1.18.0
 scikit-learn==1.9.0
 yfinance==1.5.1
 requests==2.34.2
-# sentiment (optional but installed): FinBERT via transformers
-transformers==5.13.0
-torch==2.12.1+cpu

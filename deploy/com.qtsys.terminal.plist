@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- launchd job: QTSYS starts at login and restarts if it dies.
+     Install (after editing the two REPO paths below):
+       cp deploy/com.qtsys.terminal.plist ~/Library/LaunchAgents/
+       launchctl load ~/Library/LaunchAgents/com.qtsys.terminal.plist
+     Logs: /tmp/qtsys.out / /tmp/qtsys.err -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.qtsys.terminal</string>
+  <key>ProgramArguments</key><array>
+    <string>/bin/bash</string>
+    <string>/Users/YOURUSER/quantsys/start.sh</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/YOURUSER/quantsys</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/qtsys.out</string>
+  <key>StandardErrorPath</key><string>/tmp/qtsys.err</string>
+</dict></plist>

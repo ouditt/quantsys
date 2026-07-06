@@ -1,0 +1,8 @@
+# Optional: FinBERT sentiment (QTSYS_SENTIMENT=finbert). Without these the
+# app uses the built-in lexicon scorer — everything else works unchanged.
+#   macOS (Apple Silicon):  pip install -r requirements-ml.txt
+#   Linux CPU-only:         pip install torch==2.12.1+cpu --index-url \
+#                             https://download.pytorch.org/whl/cpu \
+#                           && pip install transformers==5.13.0
+transformers==5.13.0
+torch==2.12.1
