@@ -143,17 +143,49 @@ def backtest(y: np.ndarray, x: np.ndarray, entry: float = 2.0,
             "worst_pct": round(float(tr.min()) * 100, 3),
             "beta": round(beta, 4),
             "half_life": round(hl, 1) if hl else None,
-            "test_bars": n - cut}
+            "test_bars": n - cut, "trade_returns": tr.tolist()}
+
+
+def gated_scan(prices: dict, n_trials: int | None = None, **bt) -> list[dict]:
+    """Cointegration scan -> OOS backtest -> DSR gate, the SAME verification
+    every registry strategy passes. `n_trials` is the multiple-testing
+    correction: how many pairs we searched (defaults to the pairs tested).
+    Only pairs with >=5 OOS trades get a DSR; the verdict is the honest one."""
+    from ..metrics import deflated_sharpe, verdict
+    cands = find_pairs(prices)
+    n_trials = n_trials or max(len(cands), 1)
+    out = []
+    for c in cands:
+        if not c["cointegrated"]:
+            continue
+        y, x = prices.get(c["y"]), prices.get(c["x"])
+        if y is None or x is None:
+            continue
+        res = backtest(y, x, **bt)
+        tr = res.get("trade_returns") or []
+        dsr = (deflated_sharpe(__import__("pandas").Series(tr), n_trials)
+               if len(tr) >= 5 else 0.0)
+        out.append({**{k: v for k, v in c.items() if k != "n"},
+                    "n_trades": res.get("n_trades", 0),
+                    "win_rate": res.get("win_rate"),
+                    "total_ret_pct": res.get("total_ret_pct"),
+                    "worst_pct": res.get("worst_pct"),
+                    "dsr": round(dsr, 3),
+                    "verdict": verdict(dsr) if len(tr) >= 5
+                    else "INSUFFICIENT OOS TRADES — cannot verify",
+                    "n_trials": n_trials})
+    out.sort(key=lambda d: -d["dsr"])
+    return out
 
 
 # ------------------------------------------------------------------ self-test
 def _selftest():
     rng = np.random.default_rng(11)
-    n = 1500
+    n = 6000
     x = np.cumsum(rng.normal(0, 0.01, n)) + 4.0            # log random walk
     ou = np.zeros(n)
-    for t in range(1, n):                                   # OU, hl ~ 14 bars
-        ou[t] = 0.95 * ou[t - 1] + rng.normal(0, 0.004)
+    for t in range(1, n):                                   # OU, hl ~ 4 bars
+        ou[t] = 0.85 * ou[t - 1] + rng.normal(0, 0.010)
     y = 0.5 + 1.8 * x + ou
     px = {"AAA": np.exp(y), "BBB": np.exp(x),
           "CCC": np.exp(np.cumsum(rng.normal(0, 0.012, n)) + 3.0)}
@@ -161,7 +193,7 @@ def _selftest():
     top = res[0]
     assert {top["y"], top["x"]} == {"AAA", "BBB"}, "true pair ranks first"
     assert top["cointegrated"] and top["adf"] < -5, f"ADF {top['adf']}"
-    assert top["half_life"] and 5 < top["half_life"] < 40, top["half_life"]
+    assert top["half_life"] and 2 < top["half_life"] < 40, top["half_life"]
     assert abs(top["beta"] - 1.8) < 0.15, f"beta {top['beta']}"
     fake = [r for r in res if {r["y"], r["x"]} == {"AAA", "CCC"}]
     assert not fake or not fake[0]["cointegrated"], "unrelated pair rejected"
@@ -169,10 +201,18 @@ def _selftest():
     assert bt["n_trades"] >= 3 and bt["total_ret_pct"] > 0, bt
     assert bt["win_rate"] >= 0.6, bt
     b0 = backtest(px["AAA"], px["CCC"])
+    assert "trade_returns" in bt and len(bt["trade_returns"]) == bt["n_trades"]
+    gs = gated_scan(px)
+    real = [g for g in gs if {g["y"], g["x"]} == {"AAA", "BBB"}]
+    # enough OOS trades now that the DSR gate actually engages (>=30 obs)
+    assert real and real[0]["n_trades"] >= 30, real
+    assert real[0]["dsr"] > 0.5 and "REAL EDGE" in real[0]["verdict"], real
+    assert all("n_trials" in g for g in gs), "DSR carries the trials correction"
     print(f"pairs self-test ✓  EG detect (ADF {top['adf']}), beta/half-life "
           f"recovered, OOS bt: {bt['n_trades']} trades wr={bt['win_rate']} "
           f"total={bt['total_ret_pct']}% | junk pair: "
-          f"{b0.get('total_ret_pct', 'n/a')}%")
+          f"{b0.get('total_ret_pct', 'n/a')}% | DSR-gated: "
+          f"{real[0]['dsr']} ({real[0]['verdict'][:24]}…)")
 
 
 if __name__ == "__main__":

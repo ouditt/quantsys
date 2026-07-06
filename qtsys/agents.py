@@ -403,26 +403,29 @@ class AgentDaemon:
                 px[s] = load_real(s)["close"].to_numpy()[-1500:]
             except Exception:
                 continue
-        res = pairs.find_pairs(px)
-        co = [r for r in res if r["cointegrated"]]
+        gs = pairs.gated_scan(px)               # cointegration -> OOS bt -> DSR
+        co = [r for r in gs if r["cointegrated"]]
+        n_tested = len(pairs.find_pairs(px))
         L = [f"ARB BRIEF — pairs scan over {len(px)} instruments "
-             f"({len(res)} pairs tested, {len(co)} cointegrated at EG 5%)", "",
-             "COINTEGRATED (most mean-reverting first; verify the ECONOMIC "
-             "link — statistical passes without one are how spurious pairs "
-             "burn accounts):"]
+             f"({n_tested} pairs tested, {len(co)} cointegrated at EG 5%)", "",
+             "DSR-GATED (the SAME verification every registry strategy passes; "
+             "DSR corrects for how many pairs we searched — verify the ECONOMIC "
+             "link too, statistical passes without one burn accounts):"]
         for r in co[:6]:
-            L.append(f"  {r['y']:7s}~{r['x']:7s} ADF {r['adf']:+.2f}  "
-                     f"β {r['beta']:+.3f}  half-life {r['half_life']}d")
-        L.append("")
-        L.append("OUT-OF-SAMPLE BACKTESTS (params fit on train only, 4-leg fees):")
-        for r in co[:3]:
-            bt = pairs.backtest(px[r["y"]], px[r["x"]])
-            if bt.get("n_trades"):
-                L.append(f"  {r['y']}~{r['x']}: {bt['n_trades']} trades, "
-                         f"wr {bt['win_rate']:.0%}, total {bt['total_ret_pct']}% "
-                         f"of spread notional, worst {bt['worst_pct']}%")
-            else:
-                L.append(f"  {r['y']}~{r['x']}: {bt.get('note', 'no result')}")
+            tag = ("✓" if r["dsr"] >= 0.95 else "~" if r["dsr"] >= 0.80 else "✗")
+            L.append(f"  {tag} {r['y']:7s}~{r['x']:7s} ADF {r['adf']:+.2f}  "
+                     f"β {r['beta']:+.3f}  hl {r['half_life']}d  "
+                     f"OOS {r['n_trades']}tr wr {(r['win_rate'] or 0):.0%} "
+                     f"{r['total_ret_pct']}%  DSR {r['dsr']}")
+        survivors = [r for r in co if r["dsr"] >= 0.95]
+        if survivors:
+            s = survivors[0]
+            self.propose("Arb Strategist", "pairs",
+                         f"{s['y']}~{s['x']} passed the DSR gate ({s['dsr']}): "
+                         f"long/short the spread at ±2σ, β {s['beta']}",
+                         symbol=s["y"], side="buy",
+                         dedup=f"pair:{s['y']}~{s['x']}",
+                         payload={"x": s["x"], "beta": s["beta"], "dsr": s["dsr"]})
         ob = self.context.get("orderbook")
         if ob:
             L += ["", "TRIANGULAR LOOPS (live L2-walked, net of taker fees):"]
