@@ -280,6 +280,7 @@ class AlpacaBroker(Broker):
                      "last": StockLatestTradeRequest,
                      "last_crypto": CryptoLatestTradeRequest}
         self._key, self._sec = api_key, secret
+        self.paper = paper                        # read by the auto-trader safety gate
         self.c = TradingClient(api_key, secret, paper=paper)
         self.d = StockHistoricalDataClient(api_key, secret)
         self.dc = CryptoHistoricalDataClient(api_key, secret)

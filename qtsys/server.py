@@ -207,6 +207,18 @@ async def boot() -> None:
         except Exception:
             return {}
     daemon.context["weights"] = _live_weights
+    # daily trade plan + guarded auto-execution engine
+    from .tradeplan import PlanStore
+    from .autotrader import AutoTrader
+    state["planstore"] = PlanStore()
+    state["autotrader"] = AutoTrader(
+        gw, broker, vmap=VENUE_SYMBOLS.get(venue) or {},
+        log=daemon.log,
+        notify=lambda t, b="", p="normal": __import__(
+            "qtsys.notify", fromlist=["send"]).send(t, b, p))
+    daemon.autotrader = state["autotrader"]
+    daemon.planstore = state["planstore"]
+    daemon.build_plan = lambda: _build_and_adopt_plan(execute=False)
     if hasattr(broker, "crypto_orderbook"):   # free crypto L2 + benefit experiment
         daemon.context["orderbook"] = broker.crypto_orderbook
         try:
@@ -231,6 +243,7 @@ async def boot() -> None:
     asyncio.create_task(_daily_scan_loop())      # auto-run the morning scan daily
     asyncio.create_task(_prewarm_screener())     # warm the fundamentals cache
     asyncio.create_task(_alerts_loop())          # evaluate alerts continuously
+    asyncio.create_task(_autotrader_loop())      # TP/SL monitor for auto-trades
 
 
 async def _tick_loop() -> None:
@@ -1257,6 +1270,151 @@ async def _daily_scan_loop():
         except Exception:
             pass
         await asyncio.sleep(3600)                 # re-check hourly
+
+
+# ------------------------------------------------- daily plan + auto-trader
+def _atr(sym: str, n: int = 14):
+    bars = state["hist"].get(sym, [])
+    if len(bars) < n + 1:
+        return None
+    trs = [max(bars[i]["h"] - bars[i]["l"], abs(bars[i]["h"] - bars[i - 1]["c"]),
+               abs(bars[i]["l"] - bars[i - 1]["c"])) for i in range(len(bars) - n, len(bars))]
+    return sum(trs) / len(trs)
+
+
+def _plan_quote(sym: str):
+    q = state["daemon"].context["quotes"].get(sym, {})
+    if q.get("last"):
+        return q["last"]
+    bars = state["hist"].get(sym, [])
+    return bars[-1]["c"] if bars else None
+
+
+def _assemble_plan_data() -> dict:
+    """Gather the morning-scan inputs the PM drafts from."""
+    from . import universe
+    daemon = state["daemon"]
+    acct = {}
+    try:
+        acct = state["broker"].get_account()
+    except Exception:
+        pass
+    setups = (universe.load_last_result("1Day") or {}).get("setups", [])
+    # verified strategies from the registry summary
+    verified = set()
+    try:
+        import pandas as pd
+        p = os.path.join(HERE, "registry_summary.csv")
+        if os.path.exists(p):
+            d = pd.read_csv(p)
+            dd = pd.to_numeric(d.get("dsr"), errors="coerce")
+            verified = set(d[dd >= 0.95]["id"].astype(str))
+    except Exception:
+        pass
+    # DSR-passed stat-arb survivors + fundamental picks from open proposals
+    arb, funds = [], []
+    st = getattr(daemon, "proposals", None)
+    if st:
+        for pr in st.open(80):
+            if pr["kind"] == "pairs" and (pr["payload"] or {}).get("dsr", 0) >= 0.95:
+                arb.append({"y": pr["symbol"], "x": pr["payload"].get("x", "?"),
+                            "dsr": pr["payload"]["dsr"]})
+            elif pr["kind"] == "pick":
+                funds.append({"symbol": pr["symbol"], "rationale": pr["summary"]})
+    clusters = []
+    try:
+        from . import portfolio_risk
+        clusters = portfolio_risk.clusters()
+    except Exception:
+        pass
+    # seed quotes/bars for setup symbols so entry/ATR resolve
+    for s in setups[:14]:
+        if s["asset"] not in state["hist"]:
+            try:
+                resolve(s["asset"])
+            except Exception:
+                pass
+    return {
+        "equity": float(acct.get("equity") or 0), "posture": state.get("posture", "BALANCED"),
+        "max_order_notional": state["gw"].limits.max_order_notional,
+        "max_gross_leverage": state["gw"].limits.max_gross_leverage,
+        "quote": _plan_quote, "atr": _atr, "setups": setups,
+        "arb_survivors": arb, "fundamental_picks": funds,
+        "verified_strategies": verified, "clusters": clusters,
+        "fundamentals": lambda s: __import__("qtsys.intel", fromlist=["fundamentals"])
+        .fundamentals(s, _clsname(s) or "Equity"),
+        "orderbook": getattr(state["broker"], "crypto_orderbook", None),
+    }
+
+
+def _build_and_adopt_plan(execute: bool = False) -> dict:
+    """PM drafts, the desk deliberates one round, the plan is adopted (and
+    optionally auto-executed if the engine is armed)."""
+    from . import tradeplan
+    data = _assemble_plan_data()
+    plan = tradeplan.draft(data)
+    plan = tradeplan.deliberate(plan, data,
+                                getattr(state["daemon"], "llm_fn", None))
+    state["planstore"].save(plan)
+    state["daemon"].log("Portfolio Manager",
+                        f"DAY PLAN adopted: {len(plan['ideas'])} ideas, "
+                        f"{plan.get('dropped', 0)} dropped in review", "warn")
+    if execute:
+        plan["execution"] = state["autotrader"].execute_plan(plan)
+        state["planstore"].save(plan)
+    return plan
+
+
+async def _autotrader_loop():
+    """TP/SL monitor for the auto-trader's managed positions."""
+    await asyncio.sleep(30)
+    while True:
+        try:
+            at = state.get("autotrader")
+            if at and at.enabled:
+                await asyncio.to_thread(at.monitor)
+        except Exception:
+            pass
+        await asyncio.sleep(30)
+
+
+@app.get("/api/plan")
+def plan_get():
+    p = state["planstore"].latest() if state.get("planstore") else None
+    return p or {"status": "none", "ideas": [], "critiques": [],
+                 "notes": "No plan yet — build one from the morning scan."}
+
+
+@app.post("/api/plan/build")
+async def plan_build(body: dict | None = None):
+    execute = bool((body or {}).get("execute"))
+    return await asyncio.to_thread(_build_and_adopt_plan, execute)
+
+
+@app.get("/api/autotrader")
+def autotrader_status():
+    at = state.get("autotrader")
+    return at.status() if at else {"enabled": False}
+
+
+@app.post("/api/autotrader/toggle")
+def autotrader_toggle(body: dict):
+    at = state.get("autotrader")
+    if not at:
+        raise HTTPException(400, "auto-trader unavailable")
+    at.set_enabled(bool(body.get("enabled")))
+    return at.status()
+
+
+@app.post("/api/plan/execute")
+async def plan_execute():
+    p = state["planstore"].latest()
+    if not p or p.get("status") != "adopted":
+        raise HTTPException(400, "no adopted plan to execute")
+    res = await asyncio.to_thread(state["autotrader"].execute_plan, p)
+    p["execution"] = res
+    state["planstore"].save(p)
+    return res
 
 
 async def _run_universe_scan(broker, watch, cap, prog, tf="1Day"):

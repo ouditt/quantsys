@@ -32,6 +32,8 @@ ROSTER = [
     ("Microstructure Analyst", "crypto L2 depth sampling + weekly benefit A/B", 45),
     ("Fundamental Analyst", "valuation/growth/quality read on the book + watchlist", 180),
     ("Arb Strategist", "pairs stat-arb scan + crypto triangular loop monitor", 90),
+    ("Portfolio Manager", "drafts the daily plan, runs the desk deliberation, "
+     "hands adopted trades to the auto-trader", 300),
 ]
 
 # bundled non-equity symbols (commodity/FX/crypto/index) — no SEC CIK, so they
@@ -166,6 +168,21 @@ class AgentDaemon:
                 return self._fundamental_brief()
             if agent.name == "Arb Strategist" and self._due("arb_brief", 24):
                 return self._arb_brief()
+            if agent.name == "Portfolio Manager" and self._due("day_plan", 24):
+                if not getattr(self, "build_plan", None):
+                    return "day plan: builder not wired"
+                at = getattr(self, "autotrader", None)
+                plan = self.build_plan()             # draft + deliberate + adopt
+                res = None
+                if at and at.enabled and not res:    # armed -> execute the plan
+                    res = at.execute_plan(plan)
+                head = (f"DAY PLAN adopted: {len(plan.get('ideas', []))} ideas, "
+                        f"{plan.get('dropped', 0)} dropped in the desk review")
+                if res:
+                    head += f"; auto-trader entered {res.get('executed', 0)}"
+                elif at:
+                    head += "; auto-trader DISARMED (plan is on the PLAN page)"
+                return head
             if agent.name == "Microstructure Analyst" and self.l2lab:
                 # 180-day one-shot upgrade decision (date-gated + one-shot inside lab)
                 if self.l2lab.upgrade_due():
@@ -569,6 +586,17 @@ class AgentDaemon:
                     pass
         elif agent.name == "Arb Strategist":
             msg = self._tri_watch()
+        elif agent.name == "Portfolio Manager":
+            at = getattr(self, "autotrader", None)
+            if at and at.enabled:
+                mon = at.monitor()                   # keep TP/SL tight between deep runs
+                st = at.status()
+                msg = (f"auto-trader ARMED · {st['open']} open, "
+                       f"{st['orders_today']}/{st['max_orders_day']} orders today, "
+                       f"realized {st['realized_today']:+.0f}"
+                       + (f", closed {mon['closed']} on TP/SL" if mon['closed'] else ""))
+            else:
+                msg = "day plan set; auto-trader disarmed — trades await your arm/approval"
         elif agent.name == "Microstructure Analyst":
             if not self.l2lab:
                 msg = "crypto L2 feed not wired — experiment idle"
@@ -581,7 +609,8 @@ class AgentDaemon:
             msg = "gate idle: no new candidates above DSR 0.95 this cycle"
         else:
             msg = "cycle complete; nothing actionable — remaining on standby"
-        if agent.name in ("Arb Strategist", "Microstructure Analyst"):
+        if agent.name in ("Arb Strategist", "Microstructure Analyst",
+                          "Portfolio Manager"):
             return msg                        # quantitative reads stay verbatim
         if self.llm_fn:                       # optional richer write-up
             try:
