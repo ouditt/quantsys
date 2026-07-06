@@ -589,6 +589,13 @@ class AgentDaemon:
         elif agent.name == "Portfolio Manager":
             at = getattr(self, "autotrader", None)
             if at and at.enabled:
+                ps = getattr(self, "planstore", None)
+                plan = ps.latest() if ps else None   # armed late? run today's plan
+                if (plan and plan.get("status") == "adopted"
+                        and not at.plan_executed(plan.get("date", ""))):
+                    res = at.execute_plan(plan)
+                    return (f"executing today's plan: entered {res.get('executed', 0)}, "
+                            f"skipped {len(res.get('skipped', []))}")
                 mon = at.monitor()                   # keep TP/SL tight between deep runs
                 st = at.status()
                 msg = (f"auto-trader ARMED · {st['open']} open, "

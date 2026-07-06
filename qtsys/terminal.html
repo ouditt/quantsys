@@ -1425,8 +1425,21 @@ function vPortfolio(){
     <td class="num">${o.limit_price?fmt(o.limit_price,pxd(o.symbol)):"MKT"}</td>
     <td><span class="pill ${o.status}">${o.status.toUpperCase()}</span></td></tr>`}
   h+=`</tbody></table>
-  <div class="note">Fills (${S.fills.length}): ${S.fills.slice(0,5).map(f=>
-    `${f.side==="buy"?"▲":"▼"} ${fmt(f.qty,0)} <span class="sym" data-sym="${f.symbol}">${f.symbol}</span> @ ${fmt(f.price,pxd(f.symbol))}`).join(" · ")||"none yet"}</div></div>`;
+  <div class="note">Open/working orders above. Executed trades (incl. sells) below.</div></div>`;
+
+  h+=`<div class="panel"><div class="ph">Executed trades · venue fills <span class="right mut">${S.fills.length} recent</span></div>
+    <table><thead><tr><th>Filled</th><th>Side</th><th>Qty</th><th>Sym</th><th>Price</th><th>Notional</th></tr></thead><tbody>`;
+  for(const f of S.fills.slice(0,14)){
+    const q=+f.qty,qs=q&&q%1?q.toFixed(4):fmt(q,0);
+    const when=f.filled_at?String(f.filled_at).slice(5,16).replace("T"," "):(f.ts?new Date(f.ts*1000).toTimeString().slice(0,5):"—");
+    h+=`<tr><td class="mut">${when}</td>
+      <td><span class="pill ${f.side==="buy"?"up":"dn"}">${(f.side||"").toUpperCase()}</span></td>
+      <td class="num">${qs}</td>
+      <td><span class="sym" data-sym="${esc(f.symbol)}">${esc(f.symbol)}</span></td>
+      <td class="num">${fmt(f.price,pxd(f.symbol))}</td>
+      <td class="num">${f.price?money(q*f.price,0):"—"}</td></tr>`}
+  if(!S.fills.length)h+=`<tr><td colspan="6" class="mut">no venue fills yet</td></tr>`;
+  h+=`</tbody></table></div>`;
   return h;
 }
 
@@ -1658,6 +1671,9 @@ function vPlan(){
       <button class="btn tiny primary" id="planExec"${p.status!=="adopted"?" disabled":""}>Execute now</button></span></div>
     ${p.notes?`<div class="pb" style="border-bottom:1px dashed var(--line);font-size:11.5px;line-height:1.6"><span class="pill" style="border-color:var(--amber);color:var(--amber)">PM</span> ${esc(p.notes)}</div>`:""}
     <div style="overflow-x:auto"><table><thead><tr><th>Side</th><th>Instrument</th><th>Entry</th><th>Stop</th><th>Target</th><th>Qty</th><th>Notional</th><th>Thesis</th></tr></thead><tbody>${rows}</tbody></table></div></div>
+  ${p.execution?`<div class="panel"><div class="ph">Execution result <span class="right mut">entered ${p.execution.executed??0} · skipped ${(p.execution.skipped||[]).length}</span></div>
+    <div class="pb" style="font-size:11px">${p.execution.blocked?`<span class="pill dn">blocked</span> ${esc(p.execution.blocked)}`:
+      (p.execution.skipped||[]).map(s=>`<div class="logline"><span class="t"><span class="sym">${esc(s[0])}</span></span><span class="m mut">${esc(s[1])}</span></div>`).join("")||'<span class="mut">all ideas entered</span>'}</div></div>`:""}
   <div class="panel"><div class="ph">Desk deliberation <span class="right mut">one-round role review</span></div>
     <div class="pb">${crit}</div></div>`;
 }
@@ -2317,11 +2333,16 @@ function render(scroll){
       catch(e){toast("build failed","err")}pollPlan();render()};
     const pe=$("#planExec");if(pe)pe.onclick=()=>confirmBox("Execute plan",
       "Sends the adopted plan's entries to the venue through the gateway, and manages their TP/SL automatically. Arm the auto-trader first if it's disarmed.","EXECUTE",async()=>{
-      try{const r=await j("/api/plan/execute",{method:"POST"});toast(`entered ${r.executed}, skipped ${(r.skipped||[]).length}`,"ok");pollPlan()}
+      try{const r=await j("/api/plan/execute",{method:"POST"});
+        if(r.blocked)toast("blocked: "+r.blocked,"err");
+        else toast(`entered ${r.executed}, skipped ${(r.skipped||[]).length} — see Execution result below`,r.executed?"ok":"warn");
+        pollPlan()}
       catch(e){toast(e.detail||"execute failed","err")}});
     const at=$("#atToggle");if(at)at.onclick=()=>{const arming=!(S.autotrader&&S.autotrader.enabled);
       const go=async()=>{try{S.autotrader=await j("/api/autotrader/toggle",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:arming})});
-        toast("auto-trader "+(arming?"ARMED":"disarmed"),arming?"warn":"ok");render()}catch(e){toast("toggle failed","err")}};
+        const ex=S.autotrader.execution;
+        toast("auto-trader "+(arming?"ARMED":"disarmed")+(ex?` — plan run: entered ${ex.executed}, skipped ${(ex.skipped||[]).length}`:""),arming?"warn":"ok");
+        pollPlan();render()}catch(e){toast("toggle failed","err")}};
       if(arming)confirmBox("Arm auto-trader","Arming lets the engine place and manage LIVE (paper) orders from the adopted plan automatically, within the guardrails. TP/SL exits fire on their own.","ARM",go);else go()};
     const ao=$("#atOptions");if(ao)ao.onclick=()=>{const on=!(S.autotrader&&S.autotrader.options_on);
       const go=async()=>{try{S.autotrader=await j("/api/autotrader/toggle",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({options:on})});render()}catch(e){toast("toggle failed","err")}};

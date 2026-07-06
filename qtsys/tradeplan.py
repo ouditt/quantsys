@@ -31,7 +31,7 @@ MAX_IDEAS = 8
 
 # ---------------------------------------------------------------- idea sizing
 def _size_idea(idea: dict, equity: float, risk_pct: float,
-               max_notional: float) -> dict:
+               max_notional: float, sym_cap: float | None = None) -> dict:
     entry, atr = idea.get("entry"), idea.get("atr")
     long = idea["side"] in ("LONG", "buy")
     if not entry or not atr or atr <= 0 or not equity:
@@ -41,10 +41,15 @@ def _size_idea(idea: dict, equity: float, risk_pct: float,
     dist = abs(entry - stop)
     target = entry + R_MULTIPLE * dist if long else entry - R_MULTIPLE * dist
     qty = (equity * risk_pct) / dist if dist else 0.0
+    # clip (never skip) to BOTH caps: per-order notional and the auto-trader's
+    # per-symbol exposure cap — otherwise low-vol names structurally size
+    # above the cap and every execution gets refused
+    cap = min(max_notional, sym_cap) if sym_cap else max_notional
+    if qty * entry > cap and entry:
+        qty = cap / entry
+    if not long and "/" not in idea["symbol"]:
+        qty = float(int(qty))          # venue forbids fractional SHORT selling
     notional = qty * entry
-    if notional > max_notional and entry:            # respect the per-order cap
-        qty = max_notional / entry
-        notional = max_notional
     idea.update(stop=round(stop, 4), target=round(target, 4),
                 qty=round(qty, 6), notional=round(notional, 2),
                 risk_amt=round(qty * dist, 2), rr=R_MULTIPLE)
@@ -61,6 +66,7 @@ def draft(data: dict) -> dict:
     posture = data.get("posture", "BALANCED")
     risk_pct = RISK_PCT.get(posture, 0.015)
     maxN = data.get("max_order_notional", 25_000.0)
+    sym_cap = data.get("max_symbol_notional")        # auto-trader per-symbol cap
     quote, atr = data.get("quote", lambda s: None), data.get("atr", lambda s: None)
     ideas = []
     seen = set()
@@ -82,7 +88,7 @@ def draft(data: dict) -> dict:
              "rationale": rationale, "tier": tier, "dsr": dsr,
              "verified": bool(verified),
              "entry": round(px, 4), "atr": atr(sym)},
-            equity, risk_pct, maxN))
+            equity, risk_pct, maxN, sym_cap))
 
     for s in data.get("setups", [])[:16]:            # ranked scan setups
         side = "LONG" if s.get("side") in ("LONG", "buy") else "SHORT"

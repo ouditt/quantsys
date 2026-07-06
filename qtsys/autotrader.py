@@ -57,7 +57,8 @@ class AutoTrader:
         for mig in ("ALTER TABLE managed ADD COLUMN mode TEXT DEFAULT 'paper'",
                     "ALTER TABLE managed ADD COLUMN kind TEXT DEFAULT 'equity'",
                     "ALTER TABLE managed ADD COLUMN legs TEXT",
-                    "ALTER TABLE managed ADD COLUMN expiration TEXT"):
+                    "ALTER TABLE managed ADD COLUMN expiration TEXT",
+                    "ALTER TABLE managed ADD COLUMN strategy TEXT"):
             try:                                   # migrate older databases
                 self.db.execute(mig)
             except Exception:
@@ -187,12 +188,12 @@ class AutoTrader:
         import json
         rows = self.db.execute(
             "SELECT id,symbol,side,qty,entry,stop,target,opened_ts,"
-            "COALESCE(kind,'equity'),legs,expiration FROM managed "
+            "COALESCE(kind,'equity'),legs,expiration,strategy FROM managed "
             "WHERE status='open' ORDER BY opened_ts DESC").fetchall()
         return [{"id": r[0], "symbol": r[1], "side": r[2], "qty": r[3],
                  "entry": r[4], "stop": r[5], "target": r[6], "opened_ts": r[7],
                  "kind": r[8], "legs": json.loads(r[9]) if r[9] else None,
-                 "expiration": r[10]}
+                 "expiration": r[10], "strategy": r[11]}
                 for r in rows]
 
     # ------------------------------------------------------- guardrail check
@@ -283,23 +284,28 @@ class AutoTrader:
                 skipped.append((sym, f"gateway: {res.reason}")); continue
             self.db.execute(
                 "INSERT INTO managed(plan_date,symbol,side,qty,entry,stop,target,"
-                "order_id,status,opened_ts,realized,mode) VALUES (?,?,?,?,?,?,?,?, "
-                "'open', ?, 0, ?)",
+                "order_id,status,opened_ts,realized,mode,strategy) VALUES "
+                "(?,?,?,?,?,?,?,?, 'open', ?, 0, ?, ?)",
                 (plan.get("date", self._today()), sym, side, float(idea["qty"]),
                  idea["entry"], idea["stop"], idea["target"], res.id or "",
                  time.time(),
-                 "paper" if getattr(self.broker, "paper", True) else "live"))
+                 "paper" if getattr(self.broker, "paper", True) else "live",
+                 str(idea.get("strategy") or "auto")))
             self.db.commit()
             exposure[sym] = exposure.get(sym, 0.0) + want
             done += 1
             self.log("AutoTrader",
                      f"ENTERED {side.upper()} {idea['qty']} {sym} @~{idea['entry']} "
                      f"(stop {idea['stop']} / target {idea['target']})", "warn")
+        self._set("plan_exec:" + plan.get("date", self._today()), "1")
         if done:
             self.notify("QTSYS · plan executed",
                         f"{done} positions entered from the {plan.get('date')} plan",
                         "high")
         return {"executed": done, "skipped": skipped}
+
+    def plan_executed(self, plan_date: str) -> bool:
+        return self._get("plan_exec:" + plan_date) == "1"
 
     def _enter_spread(self, idea: dict, plan_date: str) -> tuple[bool, str]:
         """Enter a defined-risk vertical (from optexec.pick_spread). Max loss
@@ -324,6 +330,8 @@ class AutoTrader:
              sp["exit"]["target_value"], res.get("id", ""), time.time(),
              "paper" if getattr(self.broker, "paper", True) else "live",
              json.dumps(sp["legs"]), sp.get("expiration", "")))
+        self.db.execute("UPDATE managed SET strategy=? WHERE rowid=last_insert_rowid()",
+                        (str(idea.get("strategy") or "auto") + "+spread",))
         self.db.commit()
         self.log("AutoTrader",
                  f"ENTERED {sp['preset']} {sp['contracts']}x {idea['symbol']} "
@@ -381,6 +389,7 @@ class AutoTrader:
             return False
         realized = ((val - p["entry"]) * p["qty"]) if val is not None else None
         self._mark_closed(p["id"], reason, realized)
+        self._journal(p, val, reason, realized)
         self.log("AutoTrader",
                  f"{'🎯' if reason == 'target' else '🛑' if reason == 'stop' else '⏳'} "
                  f"spread {reason.upper()} {p['symbol']} @ ${val} — realized "
@@ -405,6 +414,7 @@ class AutoTrader:
         realized = ((px - p["entry"]) if p["side"] == "buy"
                     else (p["entry"] - px)) * p["qty"]
         self._mark_closed(p["id"], reason, realized)
+        self._journal(p, px, reason, realized)
         emoji = "🎯" if reason == "target" else "🛑"
         self.log("AutoTrader", f"{emoji} {reason.upper()} {p['symbol']} @ {px:g} "
                  f"— realized {realized:+.2f}", "warn")
@@ -412,6 +422,26 @@ class AutoTrader:
                     f"closed {p['qty']} {p['symbol']} @ {px:g}, P&L {realized:+.2f}",
                     "high")
         return True
+
+    def _journal(self, p: dict, exit_px, reason: str, realized):
+        """Every auto-managed close becomes a REAL trade-journal entry, so the
+        weekly review and the daily wrap reflect live trading (the journal was
+        previously never fed by live fills)."""
+        try:
+            from .journal import Journal
+            base = abs((p.get("entry") or 0) * (p.get("qty") or 0))
+            net = (realized / base) if (realized is not None and base) else None
+            Journal().log(
+                setup_id=p.get("strategy") or "auto",
+                asset=p["symbol"], side=p["side"], signal_date=p.get("plan_date", ""),
+                regime_trend="AUTO", tier="",
+                entry_px=p.get("entry"), size_units=p.get("qty"),
+                exit_px=exit_px, net_ret=net, exit_reason=reason,
+                loss_within_plan=str(reason in ("target", "stop", "expiry")),
+                breach_code="NONE",
+                note=f"auto-trader {p.get('kind', 'equity')} close")
+        except Exception:
+            pass
 
     def _mark_closed(self, mid: int, reason: str, realized):
         self.db.execute("UPDATE managed SET status='closed', closed_ts=?, "

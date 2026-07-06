@@ -1367,6 +1367,8 @@ def _assemble_plan_data() -> dict:
                 pass
     return {
         "equity": float(acct.get("equity") or 0), "posture": state.get("posture", "BALANCED"),
+        "max_symbol_notional": (float(acct.get("equity") or 0)
+                                * (at.max_symbol_pct if at else 0.10)) or None,
         "max_order_notional": state["gw"].limits.max_order_notional,
         "max_gross_leverage": state["gw"].limits.max_gross_leverage,
         "quote": _plan_quote, "atr": _atr, "setups": setups,
@@ -1600,6 +1602,19 @@ def autotrader_toggle(body: dict):
         raise HTTPException(400, "auto-trader unavailable")
     if "enabled" in body:
         at.set_enabled(bool(body.get("enabled")))
+        # arming should act TODAY: execute the adopted plan if it hasn't been
+        # attempted yet (previously arming after the PM's daily task did
+        # nothing until tomorrow — the operator's "arm does nothing" bug)
+        if at.enabled:
+            p = state["planstore"].latest()
+            if (p and p.get("status") == "adopted"
+                    and not at.plan_executed(p.get("date", ""))):
+                res = at.execute_plan(p)
+                p["execution"] = res
+                state["planstore"].save(p)
+                out = at.status()
+                out["execution"] = res
+                return out
     if "options" in body:                          # defined-risk verticals only
         at.options_on = bool(body.get("options"))
         state["daemon"].log("AutoTrader", "options auto-trading "
