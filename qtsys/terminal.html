@@ -607,7 +607,8 @@ async function liveRefresh(full){
     if(lg)S.alog=lg.map(x=>({ts:x.ts,agent:x.agent,level:x.level,message:x.message}));
     const f=await j("/api/fills").catch(()=>null);if(f)S.fills=f;
     if(!S._closedTs||Date.now()-S._closedTs>12000){S._closedTs=Date.now();
-      j("/api/closed").then(c=>{if(c)S.closed=c;if(S.page==="portfolio")render()}).catch(()=>{});}
+      j("/api/closed").then(c=>{if(c)S.closed=c;if(S.page==="portfolio")render()}).catch(()=>{});
+      j("/api/statement").then(c=>{if(c)S.statement=c;if(S.page==="portfolio")render()}).catch(()=>{});}
     j("/api/alerts").then(al=>{
       if(!S._alertInit){S._alertInit=true;S._alertSeen=al.feed.length;}
       else if(al.feed.length>S._alertSeen){
@@ -1494,6 +1495,40 @@ function vPortfolio(){
       <td class="num ${cls(t.pnl)}">${pct(t.pnl_pct)}</td></tr>`}
   if(!(cl.trades||[]).length)h+=`<tr><td colspan="8" class="mut">No closed round-trips yet — a position becomes a closed trade once its entry and a matching exit fill are paired.</td></tr>`;
   h+=`</tbody></table><div class="note">Each row pairs an entry with its exit (FIFO/VWAP), net of round-trip fees. Realised P&L is locked in; the Positions box above shows OPEN unrealised.</div></div>`;
+
+  // account statement: per-instrument TOTALS + cash events + reconciliation
+  const st=S.statement;
+  if(st){
+    const rec=st.reconciliation||{};
+    h+=`<div class="panel"><div class="ph">Account statement · per-instrument totals
+      <span class="right mut">as of ${esc(st.as_of||"")} · equity ${money(st.equity,0)} vs prior close ${money(st.prior_close_equity,0)}</span></div>`;
+    if(rec.reset_suspected)h+=`<div class="note" style="border-color:var(--dn);font-size:11.5px"><b>⚠ VENUE ADJUSTMENT DETECTED:</b> ${esc(rec.note||"")}</div>`;
+    h+=`<div style="overflow-x:auto"><table><thead><tr><th>Instrument</th><th>Fills</th><th>Bought</th><th>Sold</th><th>Realised</th><th>Open qty</th><th>Unrealised</th><th>Net total</th><th>Last</th></tr></thead><tbody>`;
+    for(const r of (st.per_symbol||[]).slice(0,20)){
+      h+=`<tr class="rowlink" data-sym="${esc(r.symbol)}"><td><span class="sym">${esc(r.symbol)}</span></td>
+        <td class="num mut">${r.n_fills}</td>
+        <td class="num">${money(r.bought_usd,0)}<br><span class="mut" style="font-size:9.5px">${r.bought_qty}</span></td>
+        <td class="num">${money(r.sold_usd,0)}<br><span class="mut" style="font-size:9.5px">${r.sold_qty}</span></td>
+        <td class="num ${cls(r.realized)}" style="font-weight:700">${signed(r.realized,2)}</td>
+        <td class="num">${r.open_qty||"—"}</td>
+        <td class="num ${cls(r.unrealized)}">${r.open_qty?signed(r.unrealized,2):"—"}</td>
+        <td class="num ${cls(r.net_total)}" style="font-weight:700">${signed(r.net_total,2)}</td>
+        <td class="mut" style="font-size:10px">${esc(r.last_activity||"")}</td></tr>`}
+    h+=`</tbody></table></div>`;
+    const t=st.totals||{};
+    h+=`<div class="pb" style="display:flex;gap:16px;flex-wrap:wrap;font-size:11px;border-top:1px dashed var(--line)">
+      <span class="mut">realised (ledger) <b class="${cls(t.realized_all_ledger)}">${signed(t.realized_all_ledger,2)}</b></span>
+      <span class="mut">unrealised (open) <b class="${cls(t.unrealized_open)}">${signed(t.unrealized_open,2)}</b></span>
+      <span class="mut">transfers <b>${signed(t.transfers,2)}</b></span>
+      <span class="mut">fees <b class="dn">${signed(t.fees,2)}</b></span>
+      <span class="mut">income <b>${signed(t.income,2)}</b></span>
+      <span class="mut">day swing <b class="${cls(st.day_change)}">${signed(st.day_change,2)}</b> — of which trading/marks <b>${signed(rec.attributed_to_trading_and_marks,2)}</b></span></div>`;
+    const ev=(st.cash_events||[]).slice(0,10);
+    if(ev.length){h+=`<div class="pb" style="border-top:1px dashed var(--line)"><div class="mut" style="font-size:10.5px;margin-bottom:4px">Cash events (non-trade): deposits, journals, fees, dividends</div>`;
+      for(const e of ev)h+=`<div class="logline"><span class="t">${esc(e.date)}</span><span class="m"><span class="pill ${e.net>=0?"up":"dn"}" style="min-width:44px;text-align:center">${esc(e.type)}</span> ${signed(e.net,2)} · <span class="mut">${esc(e.desc)}</span></span></div>`;
+      h+=`</div>`;}
+    h+=`<div class="note">Every number derives from the venue's own activities ledger. "Realised" = sold minus bought plus the cost basis still held. A large day swing with no matching transfer means the venue adjusted the account (e.g. a paper reset) — flagged above when detected.</div></div>`;
+  }
   return h;
 }
 

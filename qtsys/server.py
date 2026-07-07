@@ -2155,6 +2155,28 @@ async def ask(body: dict):
             "grounded_on": sorted(k for k in ctx if k != "as_of")}
 
 
+@app.get("/api/statement")
+async def account_statement():
+    """The transparent statement: per-instrument TOTALS (bought $, sold $,
+    realized, open, unrealized), every non-trade cash event, and a
+    reconciliation that labels any venue adjustment (e.g. a paper reset)."""
+    from . import statement
+    broker = state["broker"]
+    if not hasattr(broker, "account_activities"):
+        raise HTTPException(400, "statement needs the Alpaca venue")
+
+    def _calc():
+        acts = broker.account_activities()
+        pos = []
+        for p in broker.get_positions():
+            d = p.to_dict(p.v_last if p.v_last is not None else p.avg_price)
+            pos.append(d)
+        a = broker.get_account()
+        return statement.build(acts, pos, float(a.get("equity") or 0),
+                               float(a.get("last_equity") or 0))
+    return await asyncio.to_thread(_calc)
+
+
 @app.get("/api/closed")
 def closed_positions():
     """Closed positions / realised round-trips reconstructed from the fill

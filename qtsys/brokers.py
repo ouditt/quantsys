@@ -423,6 +423,34 @@ class AlpacaBroker(Broker):
         except Exception as e:
             return {"status": "rejected", "reason": f"venue: {str(e)[:200]}"}
 
+    def account_activities(self, pages: int = 4) -> list[dict]:
+        """FULL activities ledger (fills, fees, dividends, transfers, journals)
+        via raw REST — the installed SDK doesn't wrap /v2/account/activities.
+        The authoritative record for statements/reconciliation."""
+        import json
+        import urllib.request
+        base = ("https://paper-api.alpaca.markets" if self.paper
+                else "https://api.alpaca.markets")
+        hdr = {"APCA-API-KEY-ID": self._key, "APCA-API-SECRET-KEY": self._sec}
+        out: list[dict] = []
+        token = ""
+        for _ in range(pages):
+            url = f"{base}/v2/account/activities?page_size=100" + \
+                  (f"&page_token={token}" if token else "")
+            try:
+                req = urllib.request.Request(url, headers=hdr)
+                with urllib.request.urlopen(req, timeout=20) as r:
+                    batch = json.loads(r.read())
+            except Exception:
+                break
+            if not batch:
+                break
+            out += batch
+            token = batch[-1].get("id", "")
+            if len(batch) < 100 or not token:
+                break
+        return out
+
     def crypto_orderbook(self, symbol: str, depth: int = 20) -> dict:
         """Live L2 depth-of-book for a crypto pair (free on Alpaca). Returns
         {'bids': [(price, size), ...], 'asks': [...], 'ts': iso}. Empty on error
