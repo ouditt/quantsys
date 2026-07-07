@@ -117,6 +117,19 @@ body[data-posture="AGGRESSIVE"]{
   text-transform:uppercase;letter-spacing:.05em}
 #cmdhint{font-size:10px;color:var(--mut2);padding:5px 2px 0;letter-spacing:.04em;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#micbtn,#speakbtn{background:none;border:none;cursor:pointer;font-size:15px;
+  opacity:.55;padding:2px 4px;line-height:1}
+#micbtn:hover,#speakbtn:hover{opacity:1}
+#micbtn.rec{opacity:1;animation:pulse 1s infinite}
+#speakbtn.on{opacity:1;filter:drop-shadow(0 0 3px var(--amber))}
+@keyframes pulse{50%{filter:drop-shadow(0 0 6px var(--dn))}}
+#copilot{position:fixed;right:16px;bottom:74px;max-width:440px;z-index:60;
+  background:var(--bg1);border:1px solid var(--amber);border-radius:9px;
+  padding:12px 34px 12px 14px;box-shadow:0 8px 30px rgba(0,0,0,.5)}
+#copilot .cop-q{font-size:11px;color:var(--amber);margin-bottom:5px;font-weight:600}
+#copilot .cop-a{font-size:12.5px;line-height:1.55;white-space:pre-wrap}
+#copilot-x{position:absolute;top:6px;right:9px;background:none;border:none;
+  color:var(--mut2);cursor:pointer;font-size:16px}
 #cmdhint b{color:var(--amber-dim)}
 #tabs{flex:none;display:flex;background:var(--bg1);border-top:1px solid var(--line);
   padding-bottom:env(safe-area-inset-bottom)}
@@ -284,10 +297,13 @@ a.logline.nl .src{color:var(--amber);font-size:9.5px;text-transform:uppercase;le
 <div id="cmdwrap">
   <div id="cmdrow"><span class="p">&gt;</span>
     <input id="cmd" autocomplete="off" spellcheck="false"
-      placeholder="search any ticker: TSLA · SPY · NVDA · SOL/USD · BTC · POS · BUY WTI 100 · POSTURE BALANCED · KILL · HELP" aria-label="command">
+      placeholder="search any ticker, or ASK the desk: “what's my risk?” · “how did BNO do?” · POS · BUY WTI 100 · KILL" aria-label="command">
+    <button id="micbtn" title="ask by voice (hold-to-talk)" aria-label="voice">🎙</button>
+    <button id="speakbtn" title="read answers aloud" aria-label="speak">🔊</button>
   </div>
-  <div id="cmdhint"><b>&lt;TICKER&gt;</b> security page · <b>POS</b> portfolio · <b>RISK</b> · <b>AGT</b> agents · <b>STRAT</b> · <b>MKT</b> · <b>BUY/SELL SYM QTY [LMT px]</b> · <b>KILL</b></div>
+  <div id="cmdhint"><b>ASK</b> anything (“what's my exposure?”, “why skip AAPL?”) · <b>&lt;TICKER&gt;</b> · <b>POS</b> · <b>RISK</b> · <b>BUY/SELL SYM QTY</b> · <b>KILL</b></div>
 </div>
+<div id="copilot" style="display:none"><div id="copilot-q" class="cop-q"></div><div id="copilot-a" class="cop-a"></div><button id="copilot-x" title="close">×</button></div>
 
 <nav id="tabs" aria-label="views"></nav>
 <div id="toasts" role="status"></div>
@@ -2456,7 +2472,48 @@ function tapeAnim(){
 }
 
 /* ============================================================ commands */
+/* ============================================================ Account Copilot */
+const COP_CMDS=new Set(["POS","PORT","PORTFOLIO","RISK","AGT","AGENTS","STRAT","STRATS",
+  "MKT","MARKETS","NEWS","HELP","KILL","BUY","SELL","POSTURE"]);
+function looksLikeQuestion(raw){
+  const t=raw.trim();
+  if(t.startsWith("?"))return true;
+  const w=t.split(/\s+/);
+  if(w.length<2)return false;                        // single token = ticker/cmd
+  if(COP_CMDS.has(w[0].toUpperCase()))return false;  // a known command
+  return /[a-z]/.test(t) && /\s/.test(t);            // multi-word natural language
+}
+async function askCopilot(q){
+  q=(q||"").replace(/^\?\s*/,"").trim();if(!q)return;
+  const box=$("#copilot"),qa=$("#copilot-q"),aa=$("#copilot-a");
+  box.style.display="";qa.textContent="🎙 "+q;aa.textContent="…thinking (local model)…";
+  try{const r=await j("/api/ask",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({q})});
+    aa.textContent=r.answer||"(no answer)";
+    if(r.model)qa.title="grounded on: "+(r.grounded_on||[]).join(", ")+" · "+r.model;
+    if(S.speak)speak(r.answer);
+  }catch(e){aa.textContent="Ask failed: "+(e.detail||"is the local model running?");}
+}
+function speak(text){
+  try{if(!window.speechSynthesis||!text)return;speechSynthesis.cancel();
+    const u=new SpeechSynthesisUtterance(text.replace(/[*_`#]/g,""));
+    u.rate=1.05;u.pitch=1;speechSynthesis.speak(u);}catch(e){}
+}
+let _rec=null;
+function startVoice(){
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  if(!SR){toast("This browser has no speech recognition — type your question","err");return}
+  const mic=$("#micbtn");
+  if(_rec){try{_rec.stop()}catch(e){}_rec=null;mic.classList.remove("rec");return}
+  _rec=new SR();_rec.lang="en-US";_rec.interimResults=false;_rec.maxAlternatives=1;
+  mic.classList.add("rec");
+  _rec.onresult=e=>{const t=e.results[0][0].transcript;const cmd=$("#cmd");if(cmd)cmd.value=t;askCopilot(t)};
+  _rec.onerror=()=>{toast("voice: didn't catch that","err")};
+  _rec.onend=()=>{mic.classList.remove("rec");_rec=null};
+  try{_rec.start()}catch(e){mic.classList.remove("rec");_rec=null}
+}
 function runCmd(raw){
+  if(looksLikeQuestion(raw)){askCopilot(raw);const cmd=$("#cmd");if(cmd)cmd.value="";return}
   const c=raw.trim().toUpperCase();if(!c)return;
   const parts=c.split(/\s+/);
   const nav1={POS:"portfolio",PORT:"portfolio",PORTFOLIO:"portfolio",RISK:"risk",
@@ -2547,6 +2604,13 @@ document.addEventListener("click",e=>{
 });
 $("#killbtn").onclick=()=>S.halted?resumeTrading():killSwitch();
 $("#cmd").addEventListener("keydown",e=>{if(e.key==="Enter"){runCmd(e.target.value);e.target.value=""}});
+$("#micbtn").onclick=startVoice;
+$("#copilot-x").onclick=()=>{$("#copilot").style.display="none";try{speechSynthesis.cancel()}catch(e){}};
+(function(){const sb=$("#speakbtn");S.speak=localStorage.getItem("qtsys_speak")==="1";
+  sb.classList.toggle("on",S.speak);
+  sb.onclick=()=>{S.speak=!S.speak;localStorage.setItem("qtsys_speak",S.speak?"1":"0");
+    sb.classList.toggle("on",S.speak);toast("read answers aloud: "+(S.speak?"ON":"off"),"ok");
+    if(!S.speak)try{speechSynthesis.cancel()}catch(e){}};})();
 window.addEventListener("hashchange",()=>{routeFromHash(false)});
 function routeFromHash(initial){
   const m=location.hash.match(/^#\/sec\/([A-Za-z0-9.\-]+)/);

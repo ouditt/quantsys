@@ -186,8 +186,9 @@ async def boot() -> None:
     daemon = AgentDaemon(
         os.path.join(HERE, "qtsys_agents.db"),
         context={"quotes": {}, "account": broker.get_account})
-    from .llm import make_llm_fn
+    from .llm import make_llm_fn, local_llm_fn
     daemon.llm_fn = make_llm_fn()
+    state["copilot_llm"] = local_llm_fn()         # local-ONLY, for the Copilot
     if daemon.llm_fn:
         daemon.log("__system__", f"LLM backends: {daemon.llm_fn.backends}")
     await daemon.start()
@@ -1949,6 +1950,20 @@ def agent_log(limit: int = 60): return state["daemon"].recent_log(limit)
 
 @app.get("/api/fills")
 def fills(): return _fills(state["broker"])[::-1][:50]
+
+
+@app.post("/api/ask")
+async def ask(body: dict):
+    """Account Copilot: answer a natural-language question about the account,
+    grounded in a live snapshot, using the LOCAL model only (private)."""
+    from . import copilot
+    q = (body or {}).get("q", "")
+    llm = state.get("copilot_llm")
+    ctx = await asyncio.to_thread(copilot.build_context, state)
+    ans = await asyncio.to_thread(copilot.answer, q, ctx, llm)
+    return {"answer": ans,
+            "model": getattr(llm, "backend", None) if llm else None,
+            "grounded_on": sorted(k for k in ctx if k != "as_of")}
 
 
 @app.get("/api/closed")
