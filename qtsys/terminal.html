@@ -2483,8 +2483,24 @@ function looksLikeQuestion(raw){
   if(COP_CMDS.has(w[0].toUpperCase()))return false;  // a known command
   return /[a-z]/.test(t) && /\s/.test(t);            // multi-word natural language
 }
+const ACT_RX=/\b(arm|dis-?arm|disable|enable|activate|kill|flatten|resume|un-?halt|build|rebuild|draft|execute|run)\b.*\b(auto|trad|engine|bot|plan|switch|everything)\b|\bkill\s*switch\b|\bflatten\b/i;
+async function stageAction(text){
+  try{const r=await j("/api/action/stage",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({text,source:"voice"})});
+    if(!r.staged)return false;
+    const remoteNote=r.remote?" A confirm button was also sent to your phone (Telegram).":
+      (r.channel!=="none"?` A confirm code was pushed to your phone (${r.channel}); code: ${r.code}.`:"");
+    confirmBox("Confirm action",`${r.desc}.${remoteNote} This runs through the gateway and guardrails.`,"CONFIRM",async()=>{
+      try{const c=await j("/api/action/confirm",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({id:r.id,approve:true})});
+        toast(c.result||"done","ok");pollPlan&&pollPlan();liveRefresh&&liveRefresh();}
+      catch(e){toast(e.detail||"action failed","err")}});
+    return true;
+  }catch(e){return false}
+}
 async function askCopilot(q){
   q=(q||"").replace(/^\?\s*/,"").trim();if(!q)return;
+  if(ACT_RX.test(q)&&await stageAction(q))return;      // it's a command -> stage+confirm
   const box=$("#copilot"),qa=$("#copilot-q"),aa=$("#copilot-a");
   box.style.display="";qa.textContent="🎙 "+q;aa.textContent="…thinking (local model)…";
   try{const r=await j("/api/ask",{method:"POST",headers:{"Content-Type":"application/json"},

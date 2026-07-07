@@ -189,6 +189,8 @@ async def boot() -> None:
     from .llm import make_llm_fn, local_llm_fn
     daemon.llm_fn = make_llm_fn()
     state["copilot_llm"] = local_llm_fn()         # local-ONLY, for the Copilot
+    from .actions import PendingStore
+    state["pending"] = PendingStore()             # staged actions awaiting confirm
     if daemon.llm_fn:
         daemon.log("__system__", f"LLM backends: {daemon.llm_fn.backends}")
     await daemon.start()
@@ -273,6 +275,7 @@ async def boot() -> None:
     asyncio.create_task(_alerts_loop())          # evaluate alerts continuously
     asyncio.create_task(_autotrader_loop())      # TP/SL monitor for auto-trades
     asyncio.create_task(_intraday_scan_loop())   # live intraday opportunities -> INBOX
+    asyncio.create_task(_telegram_confirm_loop()) # phone remote-confirm of staged actions
 
 
 async def _tick_loop() -> None:
@@ -1950,6 +1953,118 @@ def agent_log(limit: int = 60): return state["daemon"].recent_log(limit)
 
 @app.get("/api/fills")
 def fills(): return _fills(state["broker"])[::-1][:50]
+
+
+def _do_action(kind: str) -> str:
+    """Run a CONFIRMED staged action — the same code paths the UI buttons use.
+    Never called without a prior confirm."""
+    at = state.get("autotrader")
+    gw = state["gw"]
+    if kind == "arm":
+        if at:
+            at.set_enabled(True)
+            p = state["planstore"].latest()
+            if (p and p.get("status") == "adopted"
+                    and not at.plan_executed(p.get("date", ""))):
+                r = at.execute_plan(p)
+                p["execution"] = r
+                state["planstore"].save(p)
+                return f"auto-trader ARMED; entered {r.get('executed', 0)} from the plan"
+            return "auto-trader ARMED"
+        return "auto-trader unavailable"
+    if kind == "disarm":
+        if at:
+            at.set_enabled(False)
+        return "auto-trader DISARMED"
+    if kind == "kill":
+        gw.halt("remote kill")
+        state["daemon"].log("system", "KILL SWITCH (remote confirmed)", "error")
+        return "KILL SWITCH — book flattened, trading halted"
+    if kind == "resume":
+        gw.resume()
+        broker = state["broker"]
+        if hasattr(broker, "day_open_equity"):
+            broker.day_open_equity = _equity(broker)
+        state["daemon"].log("system", "TRADING RESUMED (remote confirmed)")
+        return "trading resumed; day baseline reset"
+    if kind == "build_plan":
+        p = _build_and_adopt_plan(execute=False)
+        return f"day plan built: {len(p.get('ideas', []))} ideas adopted"
+    if kind == "execute_plan":
+        p = state["planstore"].latest()
+        if not p or p.get("status") != "adopted":
+            return "no adopted plan to execute"
+        r = state["autotrader"].execute_plan(p)
+        p["execution"] = r
+        state["planstore"].save(p)
+        return f"plan executed: entered {r.get('executed', 0)}, skipped {len(r.get('skipped', []))}"
+    return "unknown action"
+
+
+@app.post("/api/action/stage")
+def action_stage(body: dict):
+    """Stage a voice/text command as an action needing confirmation. Pass
+    {text} to parse an intent, or {kind} directly. Pushes a remote-confirm
+    request to the phone (Telegram buttons / ntfy code)."""
+    from . import actions, notify
+    kind = (body or {}).get("kind")
+    if not kind:
+        intent = actions.parse_intent((body or {}).get("text", ""))
+        if not intent:
+            return {"staged": False, "reason": "not an action"}
+        kind, desc = intent["kind"], intent["desc"]
+    else:
+        desc = {"arm": "ARM the auto-trader", "disarm": "DISARM the auto-trader",
+                "kill": "KILL SWITCH — flatten and halt", "resume": "RESUME trading",
+                "build_plan": "BUILD today's plan",
+                "execute_plan": "EXECUTE the adopted plan"}.get(kind, kind)
+    p = state["pending"].stage(kind, desc, source=(body or {}).get("source", "ui"))
+    remote = notify.send_action_request(p["id"], p["code"], desc)
+    return {"staged": True, "id": p["id"], "code": p["code"], "desc": desc,
+            "kind": kind, "remote": remote,
+            "channel": notify.channel()}
+
+
+@app.post("/api/action/confirm")
+def action_confirm(body: dict):
+    """On-screen confirm of a staged action (token-authenticated, so the code
+    check is skipped here — the remote path uses the code)."""
+    d = state["pending"].resolve((body or {}).get("id", ""),
+                                 (body or {}).get("code"),
+                                 bool((body or {}).get("approve", True)))
+    if not d:
+        raise HTTPException(404, "no such pending action (expired?)")
+    if d.get("error"):
+        raise HTTPException(400, d["error"])
+    if d["status"] != "confirmed":
+        return {"ok": True, "status": "rejected"}
+    return {"ok": True, "status": "confirmed", "result": _do_action(d["kind"])}
+
+
+async def _telegram_confirm_loop():
+    """Watch Telegram for Confirm/Reject button taps and run confirmed actions
+    — this is the phone-from-abroad remote-confirm path."""
+    from . import notify
+    if not os.environ.get("QTSYS_TG_TOKEN"):
+        return
+    offset = 0
+    while True:
+        try:
+            cbs, offset = await asyncio.to_thread(notify.telegram_get_updates, offset)
+            for _uid, pid, approve, cbid in cbs:
+                d = state["pending"].resolve(pid, None, approve)
+                if not d:
+                    await asyncio.to_thread(notify.telegram_ack, cbid,
+                                            "expired or already handled")
+                    continue
+                if d["status"] == "confirmed":
+                    res = await asyncio.to_thread(_do_action, d["kind"])
+                    await asyncio.to_thread(notify.telegram_ack, cbid, res[:190])
+                    await asyncio.to_thread(notify.send, "QTSYS · done", res, "high")
+                else:
+                    await asyncio.to_thread(notify.telegram_ack, cbid, "rejected")
+        except Exception:
+            await asyncio.sleep(5)
 
 
 @app.post("/api/ask")

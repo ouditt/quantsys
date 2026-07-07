@@ -81,6 +81,73 @@ def send(title: str, body: str = "", priority: str = "normal") -> bool:
     return True
 
 
+def send_action_request(pid: str, code: str, desc: str) -> bool:
+    """Push a remote-confirm request to the phone. Telegram gets tappable
+    Confirm/Reject inline buttons (the real remote-confirm path); other
+    channels get a notification carrying the 4-digit code to type on screen.
+    Returns True if Telegram interactive buttons were sent."""
+    body = f"Confirm to proceed · code {code}\n{desc}"
+    tg_tok = os.environ.get("QTSYS_TG_TOKEN")
+    tg_chat = os.environ.get("QTSYS_TG_CHAT")
+    if tg_tok and tg_chat:
+        try:
+            payload = json.dumps({
+                "chat_id": tg_chat, "text": f"*QTSYS action*\n{desc}",
+                "parse_mode": "Markdown",
+                "reply_markup": {"inline_keyboard": [[
+                    {"text": "✅ Confirm", "callback_data": f"ok:{pid}"},
+                    {"text": "✖ Reject", "callback_data": f"no:{pid}"}]]}})
+            _post(f"https://api.telegram.org/bot{tg_tok}/sendMessage",
+                  payload.encode(), {"Content-Type": "application/json"})
+            return True
+        except Exception:
+            pass
+    send("QTSYS · confirm needed", body, "high")     # ntfy/slack: code to type
+    return False
+
+
+def telegram_get_updates(offset: int) -> tuple[list, int]:
+    """Long-poll Telegram for button taps. Returns (callbacks, next_offset)
+    where each callback is (update_id, pid, approve, callback_id). Empty and
+    unchanged offset when Telegram isn't configured or nothing arrived."""
+    tok = os.environ.get("QTSYS_TG_TOKEN")
+    if not tok:
+        return [], offset
+    try:
+        url = (f"https://api.telegram.org/bot{tok}/getUpdates?timeout=25"
+               f"&allowed_updates=[\"callback_query\"]"
+               + (f"&offset={offset}" if offset else ""))
+        with urllib.request.urlopen(url, timeout=30) as r:
+            data = json.loads(r.read())
+    except Exception:
+        return [], offset
+    out = []
+    nxt = offset
+    for u in data.get("result", []):
+        nxt = u["update_id"] + 1
+        cq = u.get("callback_query")
+        if not cq:
+            continue
+        d = cq.get("data", "")
+        if ":" in d:
+            act, pid = d.split(":", 1)
+            out.append((u["update_id"], pid, act == "ok", cq.get("id")))
+    return out, nxt
+
+
+def telegram_ack(callback_id: str, text: str):
+    """Clear the button spinner + toast the result in Telegram."""
+    tok = os.environ.get("QTSYS_TG_TOKEN")
+    if not tok or not callback_id:
+        return
+    try:
+        _post(f"https://api.telegram.org/bot{tok}/answerCallbackQuery",
+              json.dumps({"callback_query_id": callback_id, "text": text}).encode(),
+              {"Content-Type": "application/json"})
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
     print("configured channel:", channel())
     ok = send("QTSYS test", "notifications are wired ✓", "normal")
