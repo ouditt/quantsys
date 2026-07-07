@@ -289,6 +289,7 @@ class AlpacaBroker(Broker):
         a = self.c.get_account()
         return {"equity": float(a.equity), "cash": float(a.cash),
                 "buying_power": float(a.buying_power),
+                "last_equity": float(a.last_equity),   # previous trading-day close
                 "day_pnl": float(a.equity) - float(a.last_equity),
                 "gross_exposure": float(a.long_market_value) - float(a.short_market_value),
                 "net_exposure": float(a.long_market_value) + float(a.short_market_value),

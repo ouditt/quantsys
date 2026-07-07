@@ -93,6 +93,30 @@ def _equity(broker) -> float:
     return float(broker.get_account().get("equity", 0.0))
 
 
+def _day_change(broker) -> float | None:
+    """True intraday return, measured against the operator-acknowledged day
+    baseline (broker.day_open_equity). We anchor that baseline to the venue's
+    PREVIOUS-DAY CLOSE (Alpaca last_equity), not to server-boot equity — a
+    restart mid-day must not fake a drawdown. Returns None if unknown."""
+    base = getattr(broker, "day_open_equity", None)
+    if not base:
+        return None
+    return _equity(broker) / base - 1.0
+
+
+def _day_baseline(broker) -> float:
+    """Previous trading-day close if the venue reports it (Alpaca last_equity),
+    else current equity — the honest 'day open' the breaker measures from."""
+    try:
+        a = broker.get_account()
+        le = a.get("last_equity")
+        if le:
+            return float(le)
+    except Exception:
+        pass
+    return _equity(broker)
+
+
 def _cls_of(sym: str) -> str:
     """Asset class for an engine OR venue symbol (BTC and BTC/USD -> Crypto)."""
     if sym in CLS:
@@ -154,7 +178,10 @@ async def boot() -> None:
         hist[sym] = bars
     # a real venue supplies its own quotes and starts with whatever is actually
     # in the account — no seeded demo book, no replay ticks.
-    broker.day_open_equity = _equity(broker)
+    # anchor the daily-loss breaker to the venue's PREVIOUS-DAY CLOSE, not to
+    # server-boot equity — restarting mid-day must not manufacture a drawdown
+    broker.day_open_equity = _day_baseline(broker)
+    state["day_baseline_date"] = str(__import__("datetime").date.today())
 
     daemon = AgentDaemon(
         os.path.join(HERE, "qtsys_agents.db"),
@@ -271,12 +298,29 @@ async def _tick_loop() -> None:
                 price = last_close
             q[sym] = {"last": price,
                       "chg_pct": (price / prev_close - 1) * 100, "asof": asof}
-        # deterministic circuit breaker (portfolio_risk.LIMITS): -3% on the day
+        # deterministic daily-loss circuit breaker, measured against the real
+        # day baseline (prev-day close). Threshold is operator-tunable via
+        # QTSYS_DAY_LOSS_LIMIT (default -0.05); re-baselines each new calendar
+        # day so yesterday's loss never carries over.
         gw = state["gw"]
-        if not gw.halted and broker.day_open_equity:
-            day = _equity(broker) / broker.day_open_equity - 1
-            if day <= -0.03:
-                gw.halt(f"daily loss limit hit ({day:.1%}) — new entries blocked")
+        import datetime as _dt
+        today = str(_dt.date.today())
+        if state.get("day_baseline_date") != today:      # new day -> re-anchor
+            broker.day_open_equity = _day_baseline(broker)
+            state["day_baseline_date"] = today
+        limit = float(os.environ.get("QTSYS_DAY_LOSS_LIMIT", "-0.05"))
+        day = _day_change(broker)
+        if not gw.halted and day is not None and day <= limit:
+            gw.halt(f"daily loss limit hit ({day:.1%} ≤ {limit:.0%}) — "
+                    "new entries blocked; resume re-baselines the day")
+            try:
+                from . import notify
+                notify.send("QTSYS · daily-loss halt",
+                            f"day {day:.1%} hit the {limit:.0%} limit — trading "
+                            "halted. Resume from the terminal (re-baselines).",
+                            "urgent")
+            except Exception:
+                pass
         await asyncio.sleep(3.0)     # universe poll cadence (the active symbol
         # is polled every ~1s separately via /api/quote for second-by-second)
 
@@ -1064,6 +1108,10 @@ def account():
     a = state["broker"].get_account()
     a["halted"] = state["gw"].halted
     a["halt_reason"] = state["gw"].halt_reason
+    dc = _day_change(state["broker"])
+    a["day_change"] = round(dc, 4) if dc is not None else None
+    a["day_loss_limit"] = float(os.environ.get("QTSYS_DAY_LOSS_LIMIT", "-0.05"))
+    a["day_baseline"] = getattr(state["broker"], "day_open_equity", None)
     return a
 
 
@@ -1135,7 +1183,15 @@ def resume(body: dict):
     if len(reason) < 5:
         raise HTTPException(400, "a written cause is required to resume")
     state["gw"].resume()
-    state["daemon"].log("system", f"TRADING RESUMED — operator cause: {reason}")
+    # re-baseline the day to CURRENT equity so the drawdown that tripped the
+    # breaker doesn't instantly re-trip it (the operator has acknowledged it via
+    # the written cause). Without this, resume was futile — the tick loop
+    # re-halted within 3s. This is the "can't restart, it halts again" fix.
+    broker = state["broker"]
+    if hasattr(broker, "day_open_equity"):
+        broker.day_open_equity = _equity(broker)
+    state["daemon"].log("system", f"TRADING RESUMED — operator cause: {reason} "
+                        f"(day baseline reset to {_equity(broker):,.0f})")
     return {"halted": False}
 
 

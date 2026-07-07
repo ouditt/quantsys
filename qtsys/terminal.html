@@ -1388,58 +1388,59 @@ function vPortfolio(){
     <div class="pb grid3">${cards.map(([k,v,c])=>`<div class="stat"><div class="k">${k}</div>
     <div class="v num ${c}">${v}</div></div>`).join("")}</div></div>`;
 
-  h+=`<div class="panel"><div class="ph">Positions <span class="right mut">${S.positions.length} open</span></div>
-    <table><thead><tr><th>Sym</th><th>Qty</th><th>Avg cost</th><th>Last</th><th>Mkt value</th><th>Unreal P&L</th><th>Wgt</th></tr></thead><tbody>`;
-  if(!S.positions.length)h+=`<tr><td colspan="7" class="mut">Flat — no open positions.</td></tr>`;
+  const qd=q=>Math.abs(q)%1?4:0;                       // fractional-aware qty
+  const totU=S.positions.reduce((s,p)=>s+(+(p.unrealized??((p.last??S.quotes[p.symbol]?.last??p.avg_cost)-p.avg_cost)*p.qty)||0),0);
+  h+=`<div class="panel"><div class="ph">Positions · unrealised P&L
+    <span class="right">${S.positions.length} open · net unreal <b class="num ${cls(totU)}">${signed(totU,2)}</b></span></div>
+    <table><thead><tr><th>Instrument</th><th>Side</th><th>Qty</th><th>Avg cost</th><th>Last</th><th>Mkt value</th><th>Unreal P&L</th><th>Unreal %</th><th>Wgt</th></tr></thead><tbody>`;
+  if(!S.positions.length)h+=`<tr><td colspan="9" class="mut">Flat — no open positions.</td></tr>`;
   for(const p of S.positions){const last=(p.last??S.quotes[p.symbol]?.last??p.avg_cost),
+    long=p.qty>=0,
     u=(p.unrealized??(last-p.avg_cost)*p.qty),
+    cost=Math.abs(p.avg_cost*p.qty)||1,
+    upct=(p.unrealized_pct!=null?p.unrealized_pct*100:(u/cost)*100),
     mv=(p.mkt_value??p.qty*last),wg=Math.abs(mv)/Math.max(S.account.gross_exposure,1)*100;
-    h+=`<tr class="rowlink" data-sym="${p.symbol}"><td><span class="sym">${p.symbol}</span></td>
-      <td class="num">${fmt(p.qty,Math.abs(p.qty)%1?4:0)}</td>
+    h+=`<tr class="rowlink" data-sym="${esc(p.symbol)}"><td><span class="sym">${esc(p.symbol)}</span></td>
+      <td><span class="pill ${long?"up":"dn"}">${long?"LONG":"SHORT"}</span></td>
+      <td class="num">${fmt(Math.abs(p.qty),qd(p.qty))}</td>
       <td class="num">${fmt(p.avg_cost,pxd(p.symbol))}</td>
       <td class="num">${fmt(last,pxd(p.symbol))}</td>
       <td class="num">${money(mv,0)}</td>
-      <td class="num ${cls(u)}">${signed(u,0)}</td>
+      <td class="num ${cls(u)}" style="font-weight:700">${signed(u,2)}</td>
+      <td class="num ${cls(u)}">${pct(upct)}</td>
       <td><div class="bar" style="width:56px"><i style="width:${wg|0}%"></i></div></td></tr>`}
   h+="</tbody></table></div>";
 
-  const working=S.orders.filter(o=>o.status==="working");
-  h+=`<div class="panel"><div class="ph">Working orders <span class="right"><span class="pill working">${working.length} PENDING</span></span></div>
-    <table><thead><tr><th>Sym</th><th>Side</th><th>Qty</th><th>Type</th><th>Limit</th><th>State</th><th></th></tr></thead><tbody>`;
-  if(!working.length)h+=`<tr><td colspan="7" class="mut">No pending orders.</td></tr>`;
-  for(const o of working){h+=`<tr><td><span class="sym" data-sym="${o.symbol}">${o.symbol}</span></td>
-    <td class="${o.side==="buy"?"up":"dn"}">${o.side.toUpperCase()}</td>
-    <td class="num">${fmt(o.qty,0)}</td><td>${o.type.toUpperCase()}</td>
-    <td class="num">${o.limit_price?fmt(o.limit_price,pxd(o.symbol)):"—"}</td>
-    <td><span class="pill working">WORKING</span></td>
+  // pending = every OPEN order the venue is holding (any live/demo working status)
+  const PENDING=new Set(["working","new","accepted","pending_new","partially_filled","held","pending_replace","accepted_for_bidding"]);
+  const pending=S.orders.filter(o=>PENDING.has(o.status));
+  h+=`<div class="panel"><div class="ph">Pending orders <span class="right"><span class="pill working">${pending.length} PENDING</span></span></div>
+    <table><thead><tr><th>Instrument</th><th>Side</th><th>Qty</th><th>Type</th><th>Limit</th><th>Status</th><th></th></tr></thead><tbody>`;
+  if(!pending.length)h+=`<tr><td colspan="7" class="mut">No pending orders — everything is filled, cancelled, or the book is flat.</td></tr>`;
+  for(const o of pending){h+=`<tr><td><span class="sym" data-sym="${esc(o.symbol)}">${esc(o.symbol)}</span></td>
+    <td class="${o.side==="buy"?"up":"dn"}">${(o.side||"").toUpperCase()}</td>
+    <td class="num">${fmt(o.qty,qd(o.qty))}</td><td>${(o.type||"").toUpperCase()}</td>
+    <td class="num">${o.limit_price?fmt(o.limit_price,pxd(o.symbol)):"MKT"}</td>
+    <td><span class="pill working">${String(o.status||"working").replace(/_/g," ").toUpperCase()}</span></td>
     <td><button class="btn tiny danger" data-cancel="${o.id}">CANCEL</button></td></tr>`}
   h+="</tbody></table></div>";
 
-  h+=`<div class="panel"><div class="ph">Order history & fills</div>
-    <table><thead><tr><th>Time</th><th>Sym</th><th>Side</th><th>Qty</th><th>Px / Lmt</th><th>State</th></tr></thead><tbody>`;
-  const hist=S.orders.slice(0,12);
-  for(const o of hist){h+=`<tr><td class="mut">${new Date((o.ts||0)*1000).toTimeString().slice(0,8)}</td>
-    <td><span class="sym" data-sym="${o.symbol}">${o.symbol}</span></td>
-    <td class="${o.side==="buy"?"up":"dn"}">${o.side.toUpperCase()}</td>
-    <td class="num">${fmt(o.qty,0)}</td>
-    <td class="num">${o.limit_price?fmt(o.limit_price,pxd(o.symbol)):"MKT"}</td>
-    <td><span class="pill ${o.status}">${o.status.toUpperCase()}</span></td></tr>`}
-  h+=`</tbody></table>
-  <div class="note">Open/working orders above. Executed trades (incl. sells) below.</div></div>`;
-
-  h+=`<div class="panel"><div class="ph">Executed trades · venue fills <span class="right mut">${S.fills.length} recent</span></div>
-    <table><thead><tr><th>Filled</th><th>Side</th><th>Qty</th><th>Sym</th><th>Price</th><th>Notional</th></tr></thead><tbody>`;
-  for(const f of S.fills.slice(0,14)){
-    const q=+f.qty,qs=q&&q%1?q.toFixed(4):fmt(q,0);
-    const when=f.filled_at?String(f.filled_at).slice(5,16).replace("T"," "):(f.ts?new Date(f.ts*1000).toTimeString().slice(0,5):"—");
-    h+=`<tr><td class="mut">${when}</td>
+  // filled = executed venue trades (buys AND sells), most recent first
+  let cum=0;
+  h+=`<div class="panel"><div class="ph">Filled orders · executed trades <span class="right mut">${S.fills.length} recent</span></div>
+    <table><thead><tr><th>Filled</th><th>Side</th><th>Qty</th><th>Instrument</th><th>Price</th><th>Notional</th></tr></thead><tbody>`;
+  for(const f of S.fills.slice(0,20)){
+    const q=+f.qty,qs=fmt(q,qd(q));
+    const when=f.ts?new Date(f.ts*1000).toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):(f.filled_at?String(f.filled_at).slice(5,16).replace("T"," "):"—");
+    const notional=f.price?q*f.price:null;
+    h+=`<tr class="rowlink" data-sym="${esc(f.symbol)}"><td class="mut">${when}</td>
       <td><span class="pill ${f.side==="buy"?"up":"dn"}">${(f.side||"").toUpperCase()}</span></td>
       <td class="num">${qs}</td>
-      <td><span class="sym" data-sym="${esc(f.symbol)}">${esc(f.symbol)}</span></td>
+      <td><span class="sym">${esc(f.symbol)}</span></td>
       <td class="num">${fmt(f.price,pxd(f.symbol))}</td>
-      <td class="num">${f.price?money(q*f.price,0):"—"}</td></tr>`}
-  if(!S.fills.length)h+=`<tr><td colspan="6" class="mut">no venue fills yet</td></tr>`;
-  h+=`</tbody></table></div>`;
+      <td class="num">${notional!=null?money(notional,0):"—"}</td></tr>`}
+  if(!S.fills.length)h+=`<tr><td colspan="6" class="mut">No venue fills yet. Filled orders (buys and sells) appear here as they execute.</td></tr>`;
+  h+=`</tbody></table><div class="note">Pending = resting/unfilled orders (cancellable). Filled = trades the venue actually executed, both entries (BUY) and exits (SELL).</div></div>`;
   return h;
 }
 
