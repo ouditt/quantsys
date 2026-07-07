@@ -27,6 +27,7 @@ from __future__ import annotations
 import datetime
 import os
 import sqlite3
+import threading
 import time
 
 
@@ -44,9 +45,15 @@ class AutoTrader:
         self.rmap = {v: k for k, v in self.vmap.items()}
         self.log = log or (lambda *a, **k: None)
         self.notify = notify or (lambda *a, **k: None)
+        # execute_plan (entries) and monitor (exits) both mutate live orders and
+        # run from MULTIPLE threads (the 30s monitor loop via to_thread, the PM
+        # agent in the event loop, and endpoints). Serialize them so the same
+        # position can't be entered or closed twice concurrently.
+        self._lock = threading.RLock()
         self.db = sqlite3.connect(
             db_path or os.path.join(os.path.dirname(__file__), "autotrader.db"),
             check_same_thread=False)
+        self.db.execute("PRAGMA busy_timeout=5000")   # wait out brief lock contention
         self.db.executescript("""
         CREATE TABLE IF NOT EXISTS managed(
           id INTEGER PRIMARY KEY, plan_date TEXT, symbol TEXT, side TEXT,
@@ -226,6 +233,10 @@ class AutoTrader:
     # ------------------------------------------------------------ execution
     def execute_plan(self, plan: dict) -> dict:
         """Enter the adopted plan's ideas, guardrail- and gateway-checked."""
+        with self._lock:
+            return self._execute_plan_locked(plan)
+
+    def _execute_plan_locked(self, plan: dict) -> dict:
         from .brokers import Order
         blk = self._blocked()
         if blk:
@@ -358,6 +369,10 @@ class AutoTrader:
 
     def monitor(self) -> dict:
         """Close managed positions that hit TP or SL; reconcile on halt."""
+        with self._lock:
+            return self._monitor_locked()
+
+    def _monitor_locked(self) -> dict:
         closed = 0
         halted = getattr(self.gw, "halted", False)
         for p in self.open_positions():

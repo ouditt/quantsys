@@ -37,6 +37,7 @@ class L2Lab:
         """ob_fn: symbol -> book dict {'bids':[(px,sz)..],'asks':[..]}."""
         self.ob_fn = ob_fn
         self.db = sqlite3.connect(db_path, check_same_thread=False)
+        self.db.execute("PRAGMA busy_timeout=5000")
         self._init()
 
     def _init(self):

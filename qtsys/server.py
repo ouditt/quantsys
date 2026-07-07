@@ -1958,7 +1958,7 @@ def closed_positions():
     closed trades — manual and auto-trader alike."""
     from . import tracking
     trips = tracking.realised_roundtrips(_fills(state["broker"]),
-                                         lambda s: _clsname(s) or "Equity")
+                                         lambda s: _cls_of(s) or "Equity")
     wins = [t for t in trips if t["pnl"] > 0]
     return {"trades": trips[:80], "n": len(trips),
             "realised_pnl": round(sum(t["pnl"] for t in trips), 2),

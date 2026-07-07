@@ -35,6 +35,7 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "pit_fundamentals.db")
 class PITStore:
     def __init__(self, db_path: str = DB_PATH):
         self.db = sqlite3.connect(db_path, check_same_thread=False)
+        self.db.execute("PRAGMA busy_timeout=5000")
         self.db.execute("""CREATE TABLE IF NOT EXISTS vintage(
             asof TEXT, symbol TEXT, metrics TEXT,
             PRIMARY KEY(asof, symbol))""")

@@ -478,7 +478,7 @@ function demoAgentsInit(){
 function alog(agent,message,level="info"){S.alog.unshift({ts:Date.now()/1000,agent,level,message});
   if(S.alog.length>120)S.alog.pop()}
 function agentWork(a){
-  const q=Object.entries(S.quotes).map(([s,v])=>({s,c:(v.last/v.prevClose-1)*100}))
+  const q=Object.entries(S.quotes).map(([s,v])=>({s,c:v.prevClose?(v.last/v.prevClose-1)*100:0}))
     .sort((x,y)=>Math.abs(y.c)-Math.abs(x.c)).slice(0,3);
   const acct=S.account;
   switch(a.name){

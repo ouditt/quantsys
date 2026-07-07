@@ -596,12 +596,13 @@ class AgentDaemon:
                     res = at.execute_plan(plan)
                     return (f"executing today's plan: entered {res.get('executed', 0)}, "
                             f"skipped {len(res.get('skipped', []))}")
-                mon = at.monitor()                   # keep TP/SL tight between deep runs
+                # TP/SL monitoring is owned by the dedicated 30s _autotrader_loop
+                # — the PM does NOT also call monitor() (that raced it into
+                # double-closing a position). Read-only status here.
                 st = at.status()
                 msg = (f"auto-trader ARMED · {st['open']} open, "
                        f"{st['orders_today']}/{st['max_orders_day']} orders today, "
-                       f"realized {st['realized_today']:+.0f}"
-                       + (f", closed {mon['closed']} on TP/SL" if mon['closed'] else ""))
+                       f"realized {st['realized_today']:+.0f}")
             else:
                 msg = "day plan set; auto-trader disarmed — trades await your arm/approval"
         elif agent.name == "Microstructure Analyst":
