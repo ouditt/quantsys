@@ -110,9 +110,10 @@ def make_llm_fn():
 
 def local_llm_fn():
     """Local-ONLY llm_fn (Ollama) for the privacy-first Account Copilot — the
-    account snapshot NEVER leaves the machine. Auto-detects an installed model
-    (env OLLAMA_MODEL wins if present). Returns None if Ollama isn't reachable
-    so the caller can tell the operator to start it."""
+    account snapshot NEVER leaves the machine. Prefers OLLAMA_COPILOT_MODEL
+    (a small, fast model for voice Q&A) over OLLAMA_MODEL (the main agent
+    model). Returns None if Ollama isn't reachable so the caller can tell
+    the operator to start it."""
     host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
     try:
         req = urllib.request.Request(f"{host}/api/tags")
@@ -122,7 +123,10 @@ def local_llm_fn():
         return None
     if not models:
         return None
-    model = os.environ.get("OLLAMA_MODEL")
+    # prefer the dedicated copilot model (small/fast), then the general model
+    model = os.environ.get("OLLAMA_COPILOT_MODEL")
+    if not model or model not in models:
+        model = os.environ.get("OLLAMA_MODEL")
     if not model or model not in models:
         model = models[0]
 
@@ -131,10 +135,10 @@ def local_llm_fn():
     def fn(prompt: str) -> str:
         p = prompt + (" /no_think" if think_off else "")
         body = json.dumps({"model": model, "prompt": p, "stream": False,
-                           "options": {"temperature": 0.2, "num_predict": 500}})
+                           "options": {"temperature": 0.2, "num_predict": 300}})
         req = urllib.request.Request(f"{host}/api/generate", data=body.encode(),
                                      headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=180) as r:   # local CPU is slow
+        with urllib.request.urlopen(req, timeout=60) as r:
             out = json.loads(r.read())
         txt = (out.get("response") or "").strip()
         return re.sub(r"(?is)<think>.*?</think>", "", txt).strip()

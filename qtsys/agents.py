@@ -634,7 +634,8 @@ class AgentDaemon:
         while True:
             if self.master and agent.enabled:
                 try:
-                    msg = (agent.work_fn or self._default_work)(agent)
+                    fn = agent.work_fn or self._default_work
+                    msg = await asyncio.to_thread(fn, agent)
                     agent.last_message = msg
                     agent.last_heartbeat = time.time()
                     self.log(agent.name, msg)

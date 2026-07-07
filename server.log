@@ -1,0 +1,23 @@
+INFO:     Started server process [423254]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8001 (Press CTRL+C to quit)
+INFO:     127.0.0.1:53566 - "WebSocket /ws?t=7ba1ed33d368587aaf9b4936517a34fa" 403
+INFO:     connection closed
+INFO:     127.0.0.1:46086 - "GET /api/quote?sym=NKTR HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:33252 - "WebSocket /ws?t=7ba1ed33d368587aaf9b4936517a34fa" 403
+INFO:     connection closed
+INFO:     127.0.0.1:46044 - "GET /api/quotes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46084 - "GET /api/agents HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46052 - "GET /api/account HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46072 - "GET /api/orders HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46058 - "GET /api/positions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47606 - "WebSocket /ws?t=7ba1ed33d368587aaf9b4936517a34fa" 403
+INFO:     connection closed
+INFO:     127.0.0.1:48130 - "WebSocket /ws?t=7ba1ed33d368587aaf9b4936517a34fa" 403
+INFO:     connection closed
+INFO:     Shutting down
+INFO:     Waiting for background tasks to complete. (CTRL+C to force quit)
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [423254]

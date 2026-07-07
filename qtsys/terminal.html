@@ -2546,10 +2546,17 @@ function startVoice(){
   if(_rec){try{_rec.stop()}catch(e){}_rec=null;mic.classList.remove("rec");return}
   _rec=new SR();_rec.lang="en-US";_rec.interimResults=false;_rec.maxAlternatives=1;
   mic.classList.add("rec");
+  _rec.onstart=()=>{toast("listening… speak now","ok")};
   _rec.onresult=e=>{const t=e.results[0][0].transcript;const cmd=$("#cmd");if(cmd)cmd.value=t;askCopilot(t)};
-  _rec.onerror=()=>{toast("voice: didn't catch that","err")};
+  _rec.onerror=e=>{const msgs={"not-allowed":"microphone permission denied — check browser settings",
+    "no-speech":"no speech detected — try again closer to the mic",
+    "audio-capture":"no microphone found — check your audio device",
+    "network":"speech service unreachable — Chrome needs internet for voice",
+    "aborted":"voice input aborted","service-not-allowed":"speech service not allowed — try HTTPS or Chrome",
+    "language-not-supported":"language not supported"};
+    toast("voice: "+(msgs[e.error]||e.error||"unknown error"),"err")};
   _rec.onend=()=>{mic.classList.remove("rec");_rec=null};
-  try{_rec.start()}catch(e){mic.classList.remove("rec");_rec=null}
+  try{_rec.start()}catch(e){mic.classList.remove("rec");_rec=null;toast("mic failed to start: "+e.message,"err")}
 }
 function runCmd(raw){
   if(looksLikeQuestion(raw)){askCopilot(raw);const cmd=$("#cmd");if(cmd)cmd.value="";return}
