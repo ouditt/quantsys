@@ -266,6 +266,7 @@ a.logline.nl .src{color:var(--amber);font-size:9.5px;text-transform:uppercase;le
   <span class="chip" id="clk-eq">EQ —</span>
   <span class="chip open" id="clk-cx">CRYPTO 24/7</span>
   <span class="chip" id="clk-feed" style="display:none">LIVE</span>
+  <span class="chip" id="clk-breaker" style="display:none" title="intraday account change vs the daily-loss kill limit">DAY —</span>
   <button id="agents-led" data-nav="agents" title="agents"><span class="led" id="led"></span><span id="ledtxt">AGENTS</span></button>
   <div id="equity"><div class="v num" id="eqv">—</div><div class="d num" id="eqd">—</div></div>
   <button id="killbtn">KILL</button>
@@ -602,8 +603,20 @@ async function liveRefresh(full){
       const h=await j(`/api/history/${encodeURIComponent(s)}`).catch(()=>null);
       if(h&&h.bars)S.bars[s]=h.bars}}
     if(qs||acct){S._lastOk=Date.now();}       // at least the core feed answered
-    updateFeedBadge();
+    updateFeedBadge();updateBreakerChip();
   }catch(e){updateFeedBadge();}
+}
+function updateBreakerChip(){
+  const el=$("#clk-breaker");if(!el)return;const a=S.account;
+  if(S.mode!=="live"||a.day_change==null){el.style.display="none";return}
+  el.style.display="";
+  const pctv=a.day_change*100, lim=(a.day_loss_limit??-0.05)*100;
+  // distance to the kill limit (both negative); warn as we approach it
+  const near=a.day_change<=(a.day_loss_limit*0.6);   // within 60% of the limit
+  el.className="chip "+(a.day_change<0?(near?"closed":""):"open");
+  el.textContent=`DAY ${pctv>=0?"+":""}${pctv.toFixed(2)}% / kill ${lim.toFixed(0)}%`;
+  el.title=`Intraday account change ${pctv.toFixed(2)}% vs prior close. Auto-halt at ${lim.toFixed(0)}%. `
+    +(near?"Approaching the limit.":"Comfortable margin.");
 }
 function updateFeedBadge(){
   const el=$("#clk-feed");if(!el)return;
@@ -1374,10 +1387,14 @@ async function loadNews(s){
 
 function vPortfolio(){
   const a=S.account;
+  // sum the OPEN positions' unrealised — this is what the positions box totals,
+  // and is a different thing from Day P&L (account move since prior close, which
+  // also includes trades already CLOSED today)
+  const sumUnreal=S.positions.reduce((s,p)=>s+(+(p.unrealized??((p.last??S.quotes[p.symbol]?.last??p.avg_cost)-p.avg_cost)*p.qty)||0),0);
   const cards=[["Equity",money(a.equity,0),""],["Cash",money(a.cash,0),""],
     ["Buying power",money(a.buying_power,0),""],
-    ["Day P&L",signed(a.day_pnl,0),cls(a.day_pnl)],
-    ["Open P&L",signed(a.total_pnl,0),cls(a.total_pnl)],
+    ["Day P&L (acct)",signed(a.day_pnl,0),cls(a.day_pnl)],
+    ["Unreal P&L (open)",signed(sumUnreal,0),cls(sumUnreal)],
     ["Gross exposure",money(a.gross_exposure,0),""],
     ["Net exposure",signed(a.net_exposure,0),cls(a.net_exposure)],
     ["Leverage",fmt(a.leverage,2)+"×",a.leverage>1.5?"dn":""]];
@@ -2248,7 +2265,7 @@ function render(scroll){
   $("#modechip").textContent=S.mode==="live"?"LIVE · PAPER":"REPLAY · REAL HISTORY";
   $("#clk-eq").className="chip "+(eqOpen()?"open":"closed");
   $("#clk-eq").textContent="EQ "+(eqOpen()?"OPEN":"CLOSED");
-  updateFeedBadge();
+  updateFeedBadge();updateBreakerChip();
   const a=S.account;
   $("#eqv").textContent=money(a.equity,0);
   const d=$("#eqd");d.textContent=`${signed(a.day_pnl,0)} today`;d.className="d num "+cls(a.day_pnl);

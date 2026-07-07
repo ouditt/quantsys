@@ -55,14 +55,25 @@ class Position:
     symbol: str
     qty: float                   # signed: + long, - short
     avg_price: float
+    # venue-authoritative fields (Alpaca) when available — used verbatim so the
+    # UI matches the broker exactly; else derived from the signed qty below
+    v_last: float | None = None
+    v_mkt_value: float | None = None
+    v_unrealized: float | None = None
+    v_unrealized_pct: float | None = None
+    v_unrealized_today: float | None = None
 
     def to_dict(self, last: float) -> dict:
-        mv = self.qty * last
-        upnl = (last - self.avg_price) * self.qty
+        px = self.v_last if self.v_last is not None else last
+        mv = self.v_mkt_value if self.v_mkt_value is not None else self.qty * px
+        upnl = (self.v_unrealized if self.v_unrealized is not None
+                else (px - self.avg_price) * self.qty)   # short qty<0 -> correct sign
         base = abs(self.qty * self.avg_price)
+        upct = (self.v_unrealized_pct if self.v_unrealized_pct is not None
+                else ((upnl / base) if base else 0.0))
         return {"symbol": self.symbol, "qty": self.qty, "avg_price": self.avg_price,
-                "last": last, "mkt_value": mv, "unrealized": upnl,
-                "unrealized_pct": (upnl / base) if base else 0.0,
+                "last": px, "mkt_value": mv, "unrealized": upnl,
+                "unrealized_pct": upct, "unrealized_today": self.v_unrealized_today,
                 "side": "long" if self.qty >= 0 else "short"}
 
 
@@ -297,8 +308,24 @@ class AlpacaBroker(Broker):
                 "total_pnl": float(a.equity) - float(a.last_equity)}
 
     def get_positions(self) -> list[Position]:
-        return [Position(p.symbol, float(p.qty) * (1 if p.side.value == "long" else -1),
-                         float(p.avg_entry_price)) for p in self.c.get_all_positions()]
+        # Alpaca's p.qty is ALREADY signed (negative for shorts) — do NOT
+        # re-sign by side, that double-negated shorts to look long. Carry the
+        # venue's own market value / unrealized P&L so the UI is authoritative.
+        def _f(x, d=None):
+            try:
+                return float(x)
+            except (TypeError, ValueError):
+                return d
+        out = []
+        for p in self.c.get_all_positions():
+            out.append(Position(
+                p.symbol, _f(p.qty, 0.0), _f(p.avg_entry_price, 0.0),
+                v_last=_f(getattr(p, "current_price", None)),
+                v_mkt_value=_f(getattr(p, "market_value", None)),
+                v_unrealized=_f(getattr(p, "unrealized_pl", None)),
+                v_unrealized_pct=_f(getattr(p, "unrealized_plpc", None)),
+                v_unrealized_today=_f(getattr(p, "unrealized_intraday_pl", None))))
+        return out
 
     def get_orders(self, open_only: bool = True) -> list[Order]:
         out = []
