@@ -2498,8 +2498,31 @@ async function stageAction(text){
     return true;
   }catch(e){return false}
 }
+async function playBriefing(kind){
+  const box=$("#copilot"),qa=$("#copilot-q"),aa=$("#copilot-a");
+  box.style.display="";qa.textContent="📻 "+(kind==="eod"?"End-of-day wrap":"Morning brief");
+  aa.textContent="…fetching…";
+  try{const r=await j("/api/briefing"+(kind?"?kind="+kind:""));
+    aa.textContent=r.text||"(no briefing)";
+    if(S.speak)speak(r.text);
+    return r;}
+  catch(e){aa.textContent="briefing unavailable";}
+}
+async function autoGreet(){
+  try{const r=await j("/api/briefing");if(!r||!r.text)return;
+    const flag=`qtsys_briefed_${r.date}_${r.kind}`;
+    if(localStorage.getItem(flag))return;              // already heard today
+    localStorage.setItem(flag,"1");
+    const box=$("#copilot"),qa=$("#copilot-q"),aa=$("#copilot-a");
+    box.style.display="";qa.textContent="📻 "+(r.kind==="eod"?"End-of-day wrap":"Morning brief");
+    aa.textContent=r.text;
+    if(S.speak)speak(r.text);
+  }catch(e){}
+}
 async function askCopilot(q){
   q=(q||"").replace(/^\?\s*/,"").trim();if(!q)return;
+  if(/^\s*(play\s+|read\s+|give\s+me\s+|do\s+)?(the\s+)?(morning\s+|daily\s+|day\s+)?(brief(ing)?|wrap)(\s*me)?\s*$/i.test(q)){
+    playBriefing(/wrap|eod|end/i.test(q)?"eod":"");return}   // instant, cached
   if(ACT_RX.test(q)&&await stageAction(q))return;      // it's a command -> stage+confirm
   const box=$("#copilot"),qa=$("#copilot-q"),aa=$("#copilot-a");
   box.style.display="";qa.textContent="🎙 "+q;aa.textContent="…thinking (local model)…";
@@ -2640,6 +2663,7 @@ function routeFromHash(initial){
   else{S.mode="demo";demoInit();demoAgentsInit()}
   routeFromHash(true);
   render();tapeFill();tapeAnim();
+  if(S.mode==="live")setTimeout(autoGreet,2500);   // spoken brief, once per day
   setInterval(()=>{ if(S.mode==="demo"){demoTick();agentsTick();lightRepaint();
       if(S.page==="agents"||S.page==="portfolio"||S.page==="risk"){/* full repaint below cadence */}}
   },1000);

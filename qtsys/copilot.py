@@ -176,6 +176,64 @@ def answer(question: str, ctx: dict, llm_fn) -> str:
         return f"Local model error ({type(e).__name__}); is Ollama running?"
 
 
+def briefing_from_ctx(ctx: dict, kind: str = "morning") -> str:
+    """Deterministic spoken-style briefing from a snapshot — instant (no LLM),
+    written for text-to-speech: short sentences, no symbols/markdown. The
+    server may optionally polish it with the local model afterwards."""
+    a = ctx.get("account", {})
+    pos = ctx.get("open_positions", [])
+    plan = ctx.get("today_plan") or {}
+    at = ctx.get("auto_trader", {})
+    props = ctx.get("open_proposals", [])
+    L = []
+    hello = "Good morning." if kind == "morning" else "Here is your end of day wrap."
+    L.append(hello)
+    eq = a.get("equity")
+    dc = a.get("day_change_pct")
+    if eq is not None:
+        day = (f", {'up' if (dc or 0) >= 0 else 'down'} "
+               f"{abs(dc):.2f} percent on the day" if dc is not None else "")
+        L.append(f"Equity is {eq:,.0f} dollars{day}.")
+    if a.get("halted"):
+        L.append(f"Attention: trading is HALTED — {a.get('halt_reason', 'see the terminal')}.")
+    if pos:
+        tot = sum(p.get("unrealised_pnl", 0) for p in pos)
+        L.append(f"You hold {len(pos)} open position{'s' if len(pos) != 1 else ''}, "
+                 f"unrealised {'gain' if tot >= 0 else 'loss'} of {abs(tot):,.0f} dollars.")
+        worst = min(pos, key=lambda p: p.get("unrealised_pnl", 0))
+        if worst.get("unrealised_pnl", 0) < 0:
+            L.append(f"The weakest is {worst['symbol']}, {worst['side']}, "
+                     f"down {abs(worst['unrealised_pnl']):,.0f} dollars.")
+    else:
+        L.append("The book is flat, no open positions.")
+    ideas = plan.get("ideas", [])
+    if kind == "morning" and ideas:
+        auto = [i for i in ideas if i.get("auto_tradable")]
+        L.append(f"Today's plan has {len(ideas)} ideas, "
+                 f"{len(auto)} verified for the auto trader.")
+        for i in auto[:2]:
+            L.append(f"{i['side'].title()} {i['symbol']} via {i.get('strategy', 'the scan')}.")
+        if plan.get("notes"):
+            L.append(plan["notes"].split(". ")[0] + ".")
+    if kind == "eod":
+        ex = plan.get("execution") or {}
+        if ex.get("executed") is not None:
+            L.append(f"The engine entered {ex.get('executed', 0)} planned trades today.")
+        cs = ctx.get("closed_summary") or {}
+        if cs.get("n"):
+            L.append(f"All time: {cs['n']} closed round trips, "
+                     f"win rate {cs.get('win_rate_pct', 0):.0f} percent, "
+                     f"realised {cs.get('realised_pnl', 0):+,.0f} dollars.")
+    if at:
+        L.append(f"Auto trader is {'armed' if at.get('armed') else 'disarmed'}, "
+                 f"{at.get('mode', 'paper')} mode"
+                 + (f", {at.get('open_managed', 0)} managed positions." if at.get("armed") else "."))
+    if props:
+        L.append(f"{len(props)} proposal{'s' if len(props) != 1 else ''} "
+                 "await your review in the inbox.")
+    return " ".join(L)
+
+
 def _selftest():
     # pure-assembly shape check with a fake state
     class _P:
@@ -198,7 +256,30 @@ def _selftest():
     assert "12" in out, out
     assert "isn't running" in answer("x", ctx, None)
     assert "anything about the account" in answer("", ctx, lambda p: "x")
-    print("copilot self-test ✓  grounded prompt built, no-llm + empty-q handled")
+    # briefing: morning + eod + halted variants, spoken-style, numbers present
+    bctx = {"account": {"equity": 2371.0, "day_change_pct": 1.37, "halted": False},
+            "open_positions": [{"symbol": "BNO", "side": "short",
+                                "unrealised_pnl": -86.8}],
+            "today_plan": {"ideas": [
+                {"side": "SHORT", "symbol": "BNO", "strategy": "donchian_20",
+                 "auto_tradable": True},
+                {"side": "LONG", "symbol": "ASST", "auto_tradable": False}],
+                "notes": "Momentum day. Watch oil.",
+                "execution": {"executed": 1}},
+            "auto_trader": {"armed": True, "mode": "paper", "open_managed": 1},
+            "open_proposals": [{"x": 1}],
+            "closed_summary": {"n": 244, "win_rate_pct": 33.2,
+                               "realised_pnl": 5.31}}
+    m = briefing_from_ctx(bctx, "morning")
+    assert m.startswith("Good morning") and "2,371" in m and "1.37" in m, m
+    assert "2 ideas" in m and "1 verified" in m and "BNO" in m, m
+    e = briefing_from_ctx(bctx, "eod")
+    assert "end of day" in e and "244 closed round trips" in e and "entered 1" in e, e
+    h = briefing_from_ctx({"account": {"equity": 100.0, "halted": True,
+                                       "halt_reason": "daily loss"}}, "morning")
+    assert "HALTED" in h and "flat" in h, h
+    print("copilot self-test ✓  grounded prompt built, no-llm + empty-q handled, "
+          "morning/eod/halted briefings")
 
 
 if __name__ == "__main__":

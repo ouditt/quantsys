@@ -276,6 +276,7 @@ async def boot() -> None:
     asyncio.create_task(_autotrader_loop())      # TP/SL monitor for auto-trades
     asyncio.create_task(_intraday_scan_loop())   # live intraday opportunities -> INBOX
     asyncio.create_task(_telegram_confirm_loop()) # phone remote-confirm of staged actions
+    asyncio.create_task(_briefing_loop())        # pre-generate morning/EOD voice briefs
 
 
 async def _tick_loop() -> None:
@@ -2065,6 +2066,79 @@ async def _telegram_confirm_loop():
                     await asyncio.to_thread(notify.telegram_ack, cbid, "rejected")
         except Exception:
             await asyncio.sleep(5)
+
+
+def _briefing_kind_now() -> str:
+    """morning before ~15:00 ET, end-of-day after — what a greeting should be."""
+    import datetime
+    now = datetime.datetime.utcnow()
+    et_h = (now.hour - (4 if _is_edt(now) else 5)) % 24
+    return "morning" if et_h < 15 else "eod"
+
+
+def _gen_briefing(kind: str) -> str:
+    """Deterministic spoken brief, optionally polished by the LOCAL model."""
+    from . import copilot
+    ctx = copilot.build_context(state)
+    text = copilot.briefing_from_ctx(ctx, kind)
+    llm = state.get("copilot_llm")
+    if llm:
+        try:
+            polished = llm(
+                "Rewrite this trading-desk briefing for text-to-speech: keep "
+                "EVERY number exactly as given, keep it under 10 short "
+                "sentences, plain conversational English, no markdown, no "
+                "greetings beyond the first sentence. Text:\n" + text).strip()
+            if polished and len(polished) > 40:
+                text = polished
+        except Exception:
+            pass
+    return text
+
+
+async def _briefing_loop():
+    """Pre-generate the morning brief and the end-of-day wrap once per day so
+    opening the terminal (or asking 'brief me') is instant, and ping the phone
+    when each is ready."""
+    await asyncio.sleep(90)                      # let quotes/plan settle
+    while True:
+        try:
+            import datetime
+            today = str(datetime.date.today())
+            b = state.setdefault("briefings", {})
+            kind = _briefing_kind_now()
+            key = f"{today}:{kind}"
+            if key not in b:
+                b[key] = {"kind": kind, "date": today, "generating": True}
+                text = await asyncio.to_thread(_gen_briefing, kind)
+                b[key] = {"kind": kind, "date": today, "text": text,
+                          "ts": time.time()}
+                try:
+                    from . import notify
+                    notify.send(f"QTSYS · {'morning brief' if kind == 'morning' else 'day wrap'} ready",
+                                text[:180] + "…", "normal")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        await asyncio.sleep(600)                 # re-check every 10 min
+
+
+@app.get("/api/briefing")
+async def briefing(kind: str = ""):
+    """Today's spoken briefing (morning or end-of-day). Served from the
+    pre-generated cache when ready; falls back to the instant deterministic
+    version so the answer is never empty."""
+    import datetime
+    kind = kind if kind in ("morning", "eod") else _briefing_kind_now()
+    today = str(datetime.date.today())
+    hit = state.get("briefings", {}).get(f"{today}:{kind}")
+    if hit and hit.get("text"):
+        return hit
+    from . import copilot
+    ctx = await asyncio.to_thread(copilot.build_context, state)
+    return {"kind": kind, "date": today,
+            "text": copilot.briefing_from_ctx(ctx, kind), "cached": False}
 
 
 @app.post("/api/ask")
