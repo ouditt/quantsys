@@ -232,6 +232,16 @@ class AutoTrader:
             return {"executed": 0, "blocked": blk}
         done, skipped = 0, []
         existing = {p["symbol"] for p in self.open_positions()}
+        # NET-POSITION AWARENESS: the engine only opens in symbols that are FLAT
+        # on the venue — it will not stack onto, net against, or FLIP a position
+        # it didn't open (manual holds, prior sessions). Keyed by venue symbol.
+        book = {}
+        try:
+            for p in self.broker.get_positions():
+                if p.qty:
+                    book[p.symbol] = p.qty
+        except Exception:
+            pass
         try:
             equity = float(self.broker.get_account().get("equity") or 0)
         except Exception:
@@ -245,6 +255,12 @@ class AutoTrader:
             sym = idea["symbol"]
             if sym in existing:
                 skipped.append((sym, "already managed"))
+                continue
+            vsym = self._venue(sym)
+            if vsym in book:                        # net-position awareness
+                skipped.append((sym, f"book already holds {book[vsym]:g} "
+                                f"{vsym} — engine won't net/flip an unmanaged "
+                                "position"))
                 continue
             if self._orders_today() >= self.max_orders_day:
                 skipped.append((sym, "daily order cap")); continue
@@ -463,11 +479,16 @@ class _FakeGW:
         o.status = "accepted"; o.id = "oid"; return o
 
 
+class _FakePos:
+    def __init__(self, symbol, qty): self.symbol, self.qty = symbol, qty
+
+
 class _FakeBroker:
     paper = True
-    def __init__(self): self.px = {"AAPL": 200.0}
+    def __init__(self): self.px = {"AAPL": 200.0}; self.book = []
     def get_quote(self, s): return self.px.get(s, 100.0)
     def get_account(self): return {"equity": 100000.0}
+    def get_positions(self): return self.book
     def option_spread_order(self, legs, contracts, limit_price, close=False):
         return {"status": "accepted", "id": "mleg1"}
 
@@ -496,6 +517,14 @@ def _selftest():
     at.broker.px["AAPL"] = 193.0
     at.monitor()
     assert at._realized_today() < 130, "stop close booked the loss"      # net of the win
+    # net-position awareness: an idea whose symbol is already on the book
+    # (unmanaged) is refused — no netting/flipping
+    at.broker.book = [_FakePos("TSLA", -50)]
+    held = at.execute_plan({"date": at._today(), "ideas": [
+        {"symbol": "TSLA", "side": "LONG", "qty": 1, "entry": 100.0,
+         "stop": 96.0, "target": 108.0, "notional": 100.0, "verified": True}]})
+    assert held["executed"] == 0 and "book already holds" in held["skipped"][0][1], held
+    at.broker.book = []
     # per-symbol exposure cap: 10% of 100k equity = 10k; a 20k idea is blocked
     big = {"date": at._today(), "ideas": [
         {"symbol": "MSFT", "side": "LONG", "qty": 100, "entry": 200.0,

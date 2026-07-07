@@ -349,7 +349,7 @@ const S={
     atrN:14,atrK:2,stK:14,stD:3,stSm:3,vwapWin:0},
  quotes:{},                 // sym -> {last, prevClose, spark[]}
  bars:{}, ibars:{},         // sym -> [{t,o,h,l,c,v}] ; ibars = intraday cache
- positions:[], orders:[], fills:[],
+ positions:[], orders:[], fills:[], closed:{trades:[]},
  account:{equity:0,cash:0,buying_power:0,day_pnl:0,total_pnl:0,gross_exposure:0,net_exposure:0,leverage:0,drawdown:0},
  halted:false, peak:0,
  agents:{master:true,list:[]}, alog:[],
@@ -590,6 +590,8 @@ async function liveRefresh(full){
     const lg=await j("/api/agents/log?limit=80").catch(()=>null);
     if(lg)S.alog=lg.map(x=>({ts:x.ts,agent:x.agent,level:x.level,message:x.message}));
     const f=await j("/api/fills").catch(()=>null);if(f)S.fills=f;
+    if(!S._closedTs||Date.now()-S._closedTs>12000){S._closedTs=Date.now();
+      j("/api/closed").then(c=>{if(c)S.closed=c;if(S.page==="portfolio")render()}).catch(()=>{});}
     j("/api/alerts").then(al=>{
       if(!S._alertInit){S._alertInit=true;S._alertSeen=al.feed.length;}
       else if(al.feed.length>S._alertSeen){
@@ -1458,6 +1460,24 @@ function vPortfolio(){
       <td class="num">${notional!=null?money(notional,0):"—"}</td></tr>`}
   if(!S.fills.length)h+=`<tr><td colspan="6" class="mut">No venue fills yet. Filled orders (buys and sells) appear here as they execute.</td></tr>`;
   h+=`</tbody></table><div class="note">Pending = resting/unfilled orders (cancellable). Filled = trades the venue actually executed, both entries (BUY) and exits (SELL).</div></div>`;
+
+  // closed positions = realised round-trips (entry+exit paired from fills)
+  const cl=S.closed||{trades:[]};
+  h+=`<div class="panel"><div class="ph">Closed positions · realised P&L
+    <span class="right mut">${cl.n||0} round-trips${cl.win_rate!=null?" · win "+Math.round(cl.win_rate*100)+"%":""}${cl.realised_pnl!=null?" · net <b class='"+cls(cl.realised_pnl)+"'>"+signed(cl.realised_pnl,2)+"</b>":""}</span></div>
+    <table><thead><tr><th>Closed</th><th>Side</th><th>Qty</th><th>Instrument</th><th>Entry</th><th>Exit</th><th>P&L</th><th>P&L %</th></tr></thead><tbody>`;
+  for(const t of (cl.trades||[]).slice(0,30)){
+    const when=t.closed_ts?new Date(t.closed_ts*1000).toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):"—";
+    h+=`<tr class="rowlink" data-sym="${esc(t.symbol)}"><td class="mut">${when}</td>
+      <td><span class="pill ${t.side==="long"?"up":"dn"}">${t.side.toUpperCase()}</span></td>
+      <td class="num">${fmt(t.qty,Math.abs(t.qty)%1?4:0)}</td>
+      <td><span class="sym">${esc(t.symbol)}</span></td>
+      <td class="num">${fmt(t.entry_px,pxd(t.symbol))}</td>
+      <td class="num">${fmt(t.exit_px,pxd(t.symbol))}</td>
+      <td class="num ${cls(t.pnl)}" style="font-weight:700">${signed(t.pnl,2)}</td>
+      <td class="num ${cls(t.pnl)}">${pct(t.pnl_pct)}</td></tr>`}
+  if(!(cl.trades||[]).length)h+=`<tr><td colspan="8" class="mut">No closed round-trips yet — a position becomes a closed trade once its entry and a matching exit fill are paired.</td></tr>`;
+  h+=`</tbody></table><div class="note">Each row pairs an entry with its exit (FIFO/VWAP), net of round-trip fees. Realised P&L is locked in; the Positions box above shows OPEN unrealised.</div></div>`;
   return h;
 }
 

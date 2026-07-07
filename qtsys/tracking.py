@@ -92,6 +92,49 @@ def realised_returns(fills: list[dict], cls_of) -> np.ndarray:
     return np.asarray(out, dtype=float)
 
 
+def realised_roundtrips(fills: list[dict], cls_of) -> list[dict]:
+    """Same FIFO/VWAP pairing as realised_returns, but returns the DETAILED
+    closed round-trips (for the 'closed positions' view): symbol, side, qty,
+    entry & exit price, P&L in $ and %, timestamps. Newest close first."""
+    by_sym: dict[str, list[dict]] = {}
+    for f in fills:
+        by_sym.setdefault(f["symbol"], []).append(f)
+    trips: list[dict] = []
+    for sym, fs in by_sym.items():
+        fee = _CLS_RT_FEE.get(cls_of(sym), _DEFAULT_RT_FEE)
+        fs = sorted(fs, key=lambda x: x.get("ts", 0))
+        pos = 0.0
+        entry = 0.0
+        entry_ts = 0.0
+        for f in fs:
+            q = float(f["qty"]) * (1.0 if f["side"] == "buy" else -1.0)
+            price = float(f["price"])
+            if pos == 0.0 or (pos > 0) == (q > 0):        # open / add
+                tot = abs(pos) + abs(q)
+                entry = (entry * abs(pos) + price * abs(q)) / tot if tot else price
+                if pos == 0.0:
+                    entry_ts = f.get("ts", 0.0)
+                pos += q
+            else:                                          # reduce / close / flip
+                closing = min(abs(q), abs(pos))
+                direction = 1.0 if pos > 0 else -1.0
+                gross = direction * (price / entry - 1.0)
+                pnl = direction * (price - entry) * closing
+                trips.append({
+                    "symbol": sym, "side": "long" if direction > 0 else "short",
+                    "qty": round(closing, 6), "entry_px": round(entry, 4),
+                    "exit_px": round(price, 4),
+                    "pnl": round(pnl, 2),
+                    "pnl_pct": round((gross - fee) * 100, 3),
+                    "opened_ts": entry_ts, "closed_ts": f.get("ts", 0.0)})
+                pos += q
+                if (pos > 0) != (direction > 0) and abs(pos) > 1e-12:
+                    entry = price
+                    entry_ts = f.get("ts", 0.0)
+    trips.sort(key=lambda t: t["closed_ts"], reverse=True)
+    return trips
+
+
 # ------------------------------------------------------------------- comparison
 def compare(baseline: dict, live: dict | None) -> dict:
     """Backtest-vs-live deltas and the within-1-SE verdict."""

@@ -1951,6 +1951,20 @@ def agent_log(limit: int = 60): return state["daemon"].recent_log(limit)
 def fills(): return _fills(state["broker"])[::-1][:50]
 
 
+@app.get("/api/closed")
+def closed_positions():
+    """Closed positions / realised round-trips reconstructed from the fill
+    stream (FIFO/VWAP): entry & exit price, qty, P&L in $ and %. Covers ALL
+    closed trades — manual and auto-trader alike."""
+    from . import tracking
+    trips = tracking.realised_roundtrips(_fills(state["broker"]),
+                                         lambda s: _clsname(s) or "Equity")
+    wins = [t for t in trips if t["pnl"] > 0]
+    return {"trades": trips[:80], "n": len(trips),
+            "realised_pnl": round(sum(t["pnl"] for t in trips), 2),
+            "win_rate": round(len(wins) / len(trips), 3) if trips else None}
+
+
 @app.get("/")
 def index():
     from fastapi.responses import HTMLResponse
