@@ -44,6 +44,33 @@ def _post(url: str, data: bytes, headers: dict):
         r.read()
 
 
+_TG_MAX = 4096   # Telegram message length limit
+
+
+def _telegram_send_chunked(tok: str, chat_id: str, text: str, **extra):
+    """Send a message, splitting at line boundaries if it exceeds 4096 chars."""
+    chunks = []
+    buf = ""
+    for line in text.split("\n"):
+        candidate = (buf + "\n" + line) if buf else line
+        if len(candidate) > _TG_MAX:
+            if buf:
+                chunks.append(buf)
+            # if a single line itself exceeds the limit, hard-split it
+            while len(line) > _TG_MAX:
+                chunks.append(line[:_TG_MAX])
+                line = line[_TG_MAX:]
+            buf = line
+        else:
+            buf = candidate
+    if buf:
+        chunks.append(buf)
+    for chunk in (chunks or [text]):
+        payload = json.dumps({"chat_id": chat_id, "text": chunk, **extra})
+        _post(f"https://api.telegram.org/bot{tok}/sendMessage",
+              payload.encode(), {"Content-Type": "application/json"})
+
+
 def _send_sync(title: str, body: str, priority: str):
     ch = channel()
     try:
@@ -58,11 +85,10 @@ def _send_sync(title: str, body: str, priority: str):
                    "Tags": tags})
         elif ch == "telegram":
             tok, chat = os.environ["QTSYS_TG_TOKEN"], os.environ["QTSYS_TG_CHAT"]
-            payload = json.dumps({"chat_id": chat, "text": f"*{title}*\n{body}",
-                                  "parse_mode": "Markdown",
-                                  "disable_notification": priority in ("low", "normal")})
-            _post(f"https://api.telegram.org/bot{tok}/sendMessage",
-                  payload.encode(), {"Content-Type": "application/json"})
+            _telegram_send_chunked(
+                tok, chat, f"*{title}*\n{body}",
+                parse_mode="Markdown",
+                disable_notification=priority in ("low", "normal"))
         elif ch == "slack":
             _post(os.environ["QTSYS_SLACK_WEBHOOK"],
                   json.dumps({"text": f"*{title}*\n{body}"}).encode(),
@@ -106,33 +132,43 @@ def send_action_request(pid: str, code: str, desc: str) -> bool:
     return False
 
 
-def telegram_get_updates(offset: int) -> tuple[list, int]:
-    """Long-poll Telegram for button taps. Returns (callbacks, next_offset)
-    where each callback is (update_id, pid, approve, callback_id). Empty and
-    unchanged offset when Telegram isn't configured or nothing arrived."""
+def telegram_get_updates(offset: int) -> tuple[list, list, int]:
+    """Long-poll Telegram for button taps AND text messages.
+
+    Returns (callbacks, messages, next_offset) where:
+      callbacks — [(update_id, pid, approve, callback_id), ...]
+      messages  — [(chat_id, text), ...]  (only from QTSYS_TG_CHAT)
+    Empty lists and unchanged offset when Telegram isn't configured."""
     tok = os.environ.get("QTSYS_TG_TOKEN")
     if not tok:
-        return [], offset
+        return [], [], offset
     try:
         url = (f"https://api.telegram.org/bot{tok}/getUpdates?timeout=25"
-               f"&allowed_updates=[\"callback_query\"]"
+               f"&allowed_updates=[\"callback_query\",\"message\"]"
                + (f"&offset={offset}" if offset else ""))
         with urllib.request.urlopen(url, timeout=30) as r:
             data = json.loads(r.read())
     except Exception:
-        return [], offset
-    out = []
+        return [], [], offset
+    cbs = []
+    msgs = []
     nxt = offset
+    allowed_chat = os.environ.get("QTSYS_TG_CHAT", "")
     for u in data.get("result", []):
         nxt = u["update_id"] + 1
         cq = u.get("callback_query")
-        if not cq:
+        if cq:
+            d = cq.get("data", "")
+            if ":" in d:
+                act, pid = d.split(":", 1)
+                cbs.append((u["update_id"], pid, act == "ok", cq.get("id")))
             continue
-        d = cq.get("data", "")
-        if ":" in d:
-            act, pid = d.split(":", 1)
-            out.append((u["update_id"], pid, act == "ok", cq.get("id")))
-    return out, nxt
+        msg = u.get("message") or {}
+        txt = (msg.get("text") or "").strip()
+        chat_id = str(msg.get("chat", {}).get("id", ""))
+        if txt and chat_id and chat_id == allowed_chat:
+            msgs.append((chat_id, txt))
+    return cbs, msgs, nxt
 
 
 def telegram_ack(callback_id: str, text: str):
@@ -144,6 +180,18 @@ def telegram_ack(callback_id: str, text: str):
         _post(f"https://api.telegram.org/bot{tok}/answerCallbackQuery",
               json.dumps({"callback_query_id": callback_id, "text": text}).encode(),
               {"Content-Type": "application/json"})
+    except Exception:
+        pass
+
+
+def telegram_reply(chat_id: str, text: str):
+    """Send a plain-text reply back to a Telegram chat, auto-splitting long
+    messages so nothing is truncated."""
+    tok = os.environ.get("QTSYS_TG_TOKEN")
+    if not tok or not chat_id:
+        return
+    try:
+        _telegram_send_chunked(tok, chat_id, text)
     except Exception:
         pass
 

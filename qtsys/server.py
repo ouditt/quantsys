@@ -2043,15 +2043,17 @@ def action_confirm(body: dict):
 
 
 async def _telegram_confirm_loop():
-    """Watch Telegram for Confirm/Reject button taps and run confirmed actions
-    — this is the phone-from-abroad remote-confirm path."""
-    from . import notify
+    """Watch Telegram for Confirm/Reject button taps, text commands, and
+    copilot questions — the phone-based remote-control path."""
+    from . import notify, actions
     if not os.environ.get("QTSYS_TG_TOKEN"):
         return
     offset = 0
     while True:
         try:
-            cbs, offset = await asyncio.to_thread(notify.telegram_get_updates, offset)
+            cbs, msgs, offset = await asyncio.to_thread(
+                notify.telegram_get_updates, offset)
+            # ---- button callbacks (existing confirm/reject flow) ----
             for _uid, pid, approve, cbid in cbs:
                 d = state["pending"].resolve(pid, None, approve)
                 if not d:
@@ -2064,6 +2066,25 @@ async def _telegram_confirm_loop():
                     await asyncio.to_thread(notify.send, "QTSYS · done", res, "high")
                 else:
                     await asyncio.to_thread(notify.telegram_ack, cbid, "rejected")
+            # ---- text messages (commands + copilot questions) ----
+            for chat_id, text in msgs:
+                intent = actions.parse_intent(text)
+                if intent:
+                    # command → stage with confirm buttons back to the chat
+                    p = state["pending"].stage(
+                        intent["kind"], intent["desc"], source="telegram")
+                    await asyncio.to_thread(
+                        notify.send_action_request, p["id"], p["code"],
+                        intent["desc"])
+                else:
+                    # question → copilot answers, reply in-chat
+                    from . import copilot
+                    llm = state.get("copilot_llm")
+                    ctx = await asyncio.to_thread(copilot.build_context, state)
+                    ans = await asyncio.to_thread(
+                        copilot.answer, text, ctx, llm)
+                    await asyncio.to_thread(
+                        notify.telegram_reply, chat_id, ans)
         except Exception:
             await asyncio.sleep(5)
 
@@ -2116,7 +2137,7 @@ async def _briefing_loop():
                 try:
                     from . import notify
                     notify.send(f"QTSYS · {'morning brief' if kind == 'morning' else 'day wrap'} ready",
-                                text[:180] + "…", "normal")
+                                text, "normal")
                 except Exception:
                     pass
         except Exception:

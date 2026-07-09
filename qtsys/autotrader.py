@@ -321,10 +321,12 @@ class AutoTrader:
             self.db.commit()
             exposure[sym] = exposure.get(sym, 0.0) + want
             done += 1
+            existing.add(sym)
             self.log("AutoTrader",
                      f"ENTERED {side.upper()} {idea['qty']} {sym} @~{idea['entry']} "
                      f"(stop {idea['stop']} / target {idea['target']})", "warn")
-        self._set("plan_exec:" + plan.get("date", self._today()), "1")
+        pd = plan.get("date") or self._today()
+        self._set("plan_exec:" + pd, "1")
         if done:
             self.notify("QTSYS · plan executed",
                         f"{done} positions entered from the {plan.get('date')} plan",
