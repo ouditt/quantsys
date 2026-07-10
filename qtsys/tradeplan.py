@@ -156,6 +156,10 @@ def draft(data: dict) -> dict:
             {"symbol": sym, "side": side, "strategy": strategy, "source": source,
              "rationale": rationale, "tier": tier, "dsr": dsr,
              "verified": bool(verified), "rank": rank, "action": "open",
+             # asset class is explicit so the committee transcript and executor
+             # show crypto/equity ideas passing the SAME gate; options are added
+             # post-deliberation as a defined-risk expression of a passed idea.
+             "asset_class": "Crypto" if "/" in sym else "Equity",
              "entry": round(px, 4), "atr": atr(sym)},
             equity, risk_pct, maxN, sym_cap)
         _reconcile_holding(idea, holdings.get(sym), rank, holds)
