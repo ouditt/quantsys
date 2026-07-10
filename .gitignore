@@ -20,3 +20,6 @@ qtsys/registry_results*.csv
 qtsys/reports/
 # state-migration bundles contain broker keys — never commit
 qtsys-state-*.tar.gz
+
+# per-day loss-breaker baseline (runtime state, self-anchored each day)
+qtsys/day_baseline.json

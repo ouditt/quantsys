@@ -253,6 +253,17 @@ class AutoTrader:
                     book[p.symbol] = p.qty
         except Exception:
             pass
+        # PENDING-ORDER AWARENESS: a market order submitted moments ago has not
+        # yet become a visible position — without this, a rapid second run (arm
+        # + PM loop + manual "execute now") would double-enter the same name
+        # before the first fill reports. Skip any symbol already working.
+        pending = set()
+        try:
+            for o in self.broker.get_orders(open_only=True):
+                if getattr(o, "symbol", None):
+                    pending.add(o.symbol)
+        except Exception:
+            pass
         try:
             equity = float(self.broker.get_account().get("equity") or 0)
         except Exception:
@@ -264,14 +275,23 @@ class AutoTrader:
                                      + abs(p["qty"] * p["entry"]))
         for idea in plan.get("ideas", []):
             sym = idea["symbol"]
-            if sym in existing:
+            # a deliberate, planner-authorised INCREASE is the ONLY sanctioned
+            # way to add to a held name — it carries an explicit delta qty and
+            # the "fresh top-priority signal" label; everything else is a
+            # one-and-done open that must skip names we already hold.
+            is_increase = idea.get("action") == "increase" and idea.get("qty")
+            if sym in existing and not is_increase:
                 skipped.append((sym, "already managed"))
                 continue
             vsym = self._venue(sym)
-            if vsym in book:                        # net-position awareness
+            if vsym in book and not is_increase:    # net-position awareness
                 skipped.append((sym, f"book already holds {book[vsym]:g} "
                                 f"{vsym} — engine won't net/flip an unmanaged "
                                 "position"))
+                continue
+            if vsym in pending:                     # order already in flight
+                skipped.append((sym, f"pending order already working for {vsym} "
+                                "— not double-entering before it fills"))
                 continue
             if self._orders_today() >= self.max_orders_day:
                 skipped.append((sym, "daily order cap")); continue

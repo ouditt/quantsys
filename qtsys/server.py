@@ -104,17 +104,46 @@ def _day_change(broker) -> float | None:
     return _equity(broker) / base - 1.0
 
 
-def _day_baseline(broker) -> float:
-    """Previous trading-day close if the venue reports it (Alpaca last_equity),
-    else current equity — the honest 'day open' the breaker measures from."""
+_DAY_BASE_FILE = os.path.join(HERE, "day_baseline.json")
+
+
+def _load_day_base() -> dict:
+    """Persisted {date, equity} day-open baseline — survives restarts so a
+    mid-day restart reuses today's real open instead of re-anchoring."""
     try:
-        a = broker.get_account()
-        le = a.get("last_equity")
-        if le:
-            return float(le)
+        import json
+        with open(_DAY_BASE_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_day_base(date: str, equity: float) -> None:
+    try:
+        import json
+        with open(_DAY_BASE_FILE, "w") as f:
+            json.dump({"date": date, "equity": float(equity)}, f)
     except Exception:
         pass
-    return _equity(broker)
+
+
+def _day_baseline(broker) -> float:
+    """The honest 'day open' the daily-loss breaker measures from.
+
+    Self-anchored to CURRENT equity captured at the first tick of the calendar
+    day and persisted — NOT Alpaca's last_equity. On a paper account last_equity
+    is stale (it doesn't roll at midnight and can still show a phantom
+    server-side adjustment), which would turn an overnight equity swing into a
+    fake intraday loss that wedges the kill switch permanently. Anchoring to the
+    day's actual opening equity makes every new day start at 0% drawdown."""
+    persisted = _load_day_base()
+    import datetime as _dt
+    today = str(_dt.date.today())
+    if persisted.get("date") == today and persisted.get("equity"):
+        return float(persisted["equity"])      # restart within the same day
+    eq = _equity(broker)
+    _save_day_base(today, eq)
+    return eq
 
 
 def _cls_of(sym: str) -> str:
@@ -311,13 +340,30 @@ async def _tick_loop() -> None:
         import datetime as _dt
         today = str(_dt.date.today())
         if state.get("day_baseline_date") != today:      # new day -> re-anchor
+            new_day = _load_day_base().get("date") != today
             broker.day_open_equity = _day_baseline(broker)
             state["day_baseline_date"] = today
+            # a NEW calendar day resets a *daily-loss* halt — that breaker is
+            # per-day by definition ("resume re-baselines the day"). A manual
+            # kill or any other halt stays until the operator resumes.
+            if new_day and gw.halted and getattr(gw, "halt_kind", "") == "daily_loss":
+                gw.resume()
+                state["daemon"].log("system", "new trading day — daily-loss halt "
+                                    "auto-cleared, baseline re-anchored to today's "
+                                    f"open ({broker.day_open_equity:,.0f})", "warn")
+                try:
+                    from . import notify
+                    notify.send("QTSYS · new day",
+                                "daily-loss halt auto-cleared; trading resumed at "
+                                f"today's open {broker.day_open_equity:,.0f}", "normal")
+                except Exception:
+                    pass
         limit = float(os.environ.get("QTSYS_DAY_LOSS_LIMIT", "-0.05"))
         day = _day_change(broker)
         if not gw.halted and day is not None and day <= limit:
             gw.halt(f"daily loss limit hit ({day:.1%} ≤ {limit:.0%}) — "
-                    "new entries blocked; resume re-baselines the day")
+                    "new entries blocked; resume re-baselines the day",
+                    kind="daily_loss")
             try:
                 from . import notify
                 notify.send("QTSYS · daily-loss halt",
@@ -1195,6 +1241,8 @@ def resume(body: dict):
     broker = state["broker"]
     if hasattr(broker, "day_open_equity"):
         broker.day_open_equity = _equity(broker)
+        import datetime as _dt
+        _save_day_base(str(_dt.date.today()), broker.day_open_equity)   # persist so a restart keeps it
     state["daemon"].log("system", f"TRADING RESUMED — operator cause: {reason} "
                         f"(day baseline reset to {_equity(broker):,.0f})")
     return {"halted": False}
@@ -1426,8 +1474,25 @@ def _assemble_plan_data() -> dict:
                 resolve(s["asset"])
             except Exception:
                 pass
+    # current book, keyed by ENGINE symbol, so the planner sizes to a target
+    # given what we already hold (idempotent — a name is bought once).
+    holdings: dict = {}
+    try:
+        inv = {v: k for k, v in (state.get("vmap") or {}).items()}
+        for p in state["broker"].get_positions():
+            if not p.qty:
+                continue
+            esym = inv.get(p.symbol, p.symbol)
+            entry = getattr(p, "avg_price", 0) or 0
+            notional = abs(getattr(p, "v_mkt_value", None) or p.qty * entry)
+            holdings[esym] = {"qty": p.qty, "notional": notional,
+                              "side": "LONG" if p.qty > 0 else "SHORT",
+                              "entry": entry}
+    except Exception:
+        pass
     return {
         "equity": float(acct.get("equity") or 0), "posture": state.get("posture", "BALANCED"),
+        "holdings": holdings,
         "max_symbol_notional": (float(acct.get("equity") or 0)
                                 * (at.max_symbol_pct if at else 0.10)) or None,
         "max_order_notional": state["gw"].limits.max_order_notional,

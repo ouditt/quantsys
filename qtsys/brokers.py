@@ -219,6 +219,7 @@ class ExecutionGateway:
         self.broker, self.limits, self.live = broker, limits, live
         self.halted = False
         self.halt_reason = ""
+        self.halt_kind = ""        # "daily_loss" auto-clears next day; "" (manual/kill) does not
 
     def pretrade_check(self, order: Order) -> str | None:
         if self.halted:
@@ -260,14 +261,14 @@ class ExecutionGateway:
             return order
         return self.broker.submit(order)
 
-    def halt(self, reason: str) -> None:
-        self.halted, self.halt_reason = True, reason
+    def halt(self, reason: str, kind: str = "") -> None:
+        self.halted, self.halt_reason, self.halt_kind = True, reason, kind
         for o in self.broker.get_orders(open_only=True):
             self.broker.cancel(o.id)
         self.broker.flatten_all()
 
     def resume(self) -> None:
-        self.halted, self.halt_reason = False, ""
+        self.halted, self.halt_reason, self.halt_kind = False, "", ""
 
 
 # ------------------------------------------------------- real venue adapters

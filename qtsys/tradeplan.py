@@ -56,6 +56,70 @@ def _size_idea(idea: dict, equity: float, risk_pct: float,
     return idea
 
 
+# tolerance band around a target before we bother adjusting a held position
+_REBALANCE_TOL = 0.20            # ±20% of target notional = "already at target"
+
+
+def _reconcile_holding(idea: dict, held: dict | None, rank: int,
+                       holds: list) -> None:
+    """Turn a freshly-sized target into an idempotent action given what we
+    already hold. Mutates `idea` in place; a non-executable outcome (hold /
+    trim / flip) is appended to `holds` and the idea is emptied (qty->0 so it
+    drops out of the executable plan).
+
+    Rules (the operator's spec):
+      * not held            -> action "open" (buy the full target once).
+      * held, at target     -> HOLD, no order (this kills the duplicate-buy bug).
+      * held, want MORE, and this is the single highest-priority idea (rank 0,
+        i.e. best expected return the strategist surfaced) and it's a fresh
+        signal -> action "increase", sized to the DELTA only.
+      * held, want LESS      -> DECREASE surfaced as a trim recommendation
+        (risk reduction stays with the monitor/human, not auto-stacked).
+      * held opposite side   -> FLIP surfaced for the human (engine never flips).
+    """
+    if not held or not held.get("qty"):
+        return                                   # flat -> normal open
+    sym = idea["symbol"]
+    tgt_qty = idea.get("qty") or 0.0
+    tgt_notional = idea.get("notional") or 0.0
+    held_qty = held["qty"]
+    held_side = "LONG" if held_qty > 0 else "SHORT"
+    held_notional = held.get("notional") or abs(held_qty * (idea.get("entry") or 0))
+
+    def _park(action, msg):
+        holds.append({"symbol": sym, "action": action, "held_qty": held_qty,
+                      "held_side": held_side, "note": msg,
+                      "rank": rank, "rationale": idea.get("rationale", "")})
+        idea.update(qty=0.0, notional=0.0, action=action)   # non-executable
+
+    if held_side != idea["side"]:
+        _park("flip", f"signal flipped to {idea['side']} but we hold "
+              f"{abs(held_qty):g} {held_side} — engine won't flip; human call")
+        return
+    band = max(_REBALANCE_TOL * max(tgt_notional, 1), 0.01 * (idea.get("entry") or 0))
+    if abs(tgt_notional - held_notional) <= band:
+        _park("hold", f"already at target ({abs(held_qty):g} sh ~"
+              f"{held_notional:,.0f}); no new order")
+        return
+    if tgt_notional > held_notional:                       # want MORE
+        if rank != 0:
+            _park("hold", f"holding {abs(held_qty):g} sh; a larger target exists "
+                  "but this isn't the top-priority idea — not adding")
+            return
+        delta = max(tgt_qty - abs(held_qty), 0.0)
+        if delta <= 0:
+            _park("hold", "at target"); return
+        idea.update(qty=round(delta, 6),
+                    notional=round(delta * (idea.get("entry") or 0), 2),
+                    action="increase", held_qty=held_qty, target_qty=tgt_qty,
+                    exposure_change=f"INCREASE +{delta:g} sh "
+                    f"({abs(held_qty):g}->{tgt_qty:g}) — fresh top-priority signal")
+        return
+    # want LESS -> trim recommendation (not auto-executed)
+    _park("decrease", f"target below current ({abs(held_qty):g} sh); trim "
+          f"~{abs(held_qty) - tgt_qty:g} sh to derisk — via monitor/manual")
+
+
 # ------------------------------------------------------------------- drafting
 def draft(data: dict) -> dict:
     """Assemble candidate ideas from the morning scans. `data` injects the live
@@ -74,23 +138,32 @@ def draft(data: dict) -> dict:
     verified_set = set(data.get("verified_strategies", []))
     strategy_dsr = data.get("strategy_dsr", {})
     thr = float(data.get("dsr_threshold", 0.95))
+    # current book: {engine_symbol: {"qty": signed, "notional": abs$, "side"}}.
+    # The planner sizes to a TARGET given what we already hold, so a name is
+    # bought ONCE — a held name only re-trades as an explicit increase/decrease.
+    holdings = data.get("holdings", {}) or {}
+    holds = []                     # non-executable status (hold / trim / flip)
 
     def add(sym, side, strategy, source, rationale, tier="", dsr=None,
-            verified=False):
+            verified=False, rank=99):
         if sym in seen:
             return
         px = quote(sym)
         if not px:
             return
         seen.add(sym)
-        ideas.append(_size_idea(
+        idea = _size_idea(
             {"symbol": sym, "side": side, "strategy": strategy, "source": source,
              "rationale": rationale, "tier": tier, "dsr": dsr,
-             "verified": bool(verified),
+             "verified": bool(verified), "rank": rank, "action": "open",
              "entry": round(px, 4), "atr": atr(sym)},
-            equity, risk_pct, maxN, sym_cap))
+            equity, risk_pct, maxN, sym_cap)
+        _reconcile_holding(idea, holdings.get(sym), rank, holds)
+        if idea is not None:
+            ideas.append(idea)
 
-    for s in data.get("setups", [])[:16]:            # ranked scan setups
+    setups = data.get("setups", [])[:16]              # ranked scan setups
+    for rank, s in enumerate(setups):
         side = "LONG" if s.get("side") in ("LONG", "buy") else "SHORT"
         exp = s.get("hist_exp")
         d = s.get("dsr", strategy_dsr.get(s.get("strategy")))
@@ -100,7 +173,7 @@ def draft(data: dict) -> dict:
             + (f", hist exp {exp:+.2%}/trade" if isinstance(exp, (int, float)) else ""),
             tier=s.get("tier", ""), dsr=d,
             verified=(d is not None and d >= thr)
-            or s.get("strategy") in verified_set)
+            or s.get("strategy") in verified_set, rank=rank)
     for a in data.get("arb_survivors", [])[:3]:       # DSR-passed stat-arb
         add(a["y"], "LONG", f"pairs {a['y']}~{a['x']}", "arb",
             f"cointegrated (DSR {a.get('dsr')}), long the spread",
@@ -114,7 +187,7 @@ def draft(data: dict) -> dict:
     return {"date": str(datetime.date.today()), "posture": posture,
             "equity": equity, "risk_pct": risk_pct,
             "ideas": sized[:MAX_IDEAS], "critiques": [], "notes": "",
-            "status": "draft", "ts": time.time(),
+            "holds": holds, "status": "draft", "ts": time.time(),
             "unsized_skipped": len(ideas) - len(sized)}
 
 
@@ -317,9 +390,42 @@ def _selftest():
     store = PlanStore(":memory:")
     store.save(plan)
     assert store.latest()["date"] == plan["date"]
+
+    # ---- portfolio-aware idempotency (the duplicate-buy fix) ----
+    # AAPL is the rank-0 setup. Hold it AT target -> HOLD, no order.
+    aapl_tgt = next(i for i in draft(data)["ideas"] if i["symbol"] == "AAPL")
+    at_target = dict(data, holdings={"AAPL": {
+        "qty": aapl_tgt["qty"], "notional": aapl_tgt["notional"],
+        "side": "LONG", "entry": aapl_tgt["entry"]}})
+    p2 = draft(at_target)
+    assert not [i for i in p2["ideas"] if i["symbol"] == "AAPL"], "held-at-target buys nothing"
+    assert any(h["symbol"] == "AAPL" and h["action"] == "hold" for h in p2["holds"])
+    # Hold only HALF the target of the rank-0 name -> INCREASE by the delta.
+    half = dict(data, holdings={"AAPL": {
+        "qty": aapl_tgt["qty"] / 2, "notional": aapl_tgt["notional"] / 2,
+        "side": "LONG", "entry": aapl_tgt["entry"]}})
+    p3 = draft(half)
+    inc = next(i for i in p3["ideas"] if i["symbol"] == "AAPL")
+    assert inc["action"] == "increase", "under-target top-priority -> increase"
+    assert abs(inc["qty"] - aapl_tgt["qty"] / 2) < 1e-6, "increase sized to the DELTA only"
+    # Same under-target but on a NON-top-priority name (XOM, rank 2) -> HOLD.
+    xom_tgt = next(i for i in draft(data)["ideas"] if i["symbol"] == "XOM")
+    half_xom = dict(data, holdings={"XOM": {
+        "qty": -abs(xom_tgt["qty"]) / 2, "notional": xom_tgt["notional"] / 2,
+        "side": "SHORT", "entry": xom_tgt["entry"]}})
+    p4 = draft(half_xom)
+    assert not [i for i in p4["ideas"] if i["symbol"] == "XOM"], "non-top-priority never adds"
+    assert any(h["symbol"] == "XOM" and h["action"] == "hold" for h in p4["holds"])
+    # Opposite side held -> FLIP, non-executable.
+    flip = dict(data, holdings={"AAPL": {
+        "qty": -10, "notional": 2000, "side": "SHORT", "entry": 200.0}})
+    p5 = draft(flip)
+    assert not [i for i in p5["ideas"] if i["symbol"] == "AAPL"], "won't auto-flip"
+    assert any(h["symbol"] == "AAPL" and h["action"] == "flip" for h in p5["holds"])
+
     print(f"tradeplan self-test ✓  drafted {len(plan['ideas'])} ideas w/ ATR "
           f"stops+2R targets, 4-agent deliberation, half-size on unverified, "
-          f"persisted")
+          f"persisted; portfolio-aware hold/increase/flip idempotency")
 
 
 if __name__ == "__main__":
