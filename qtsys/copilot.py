@@ -98,19 +98,111 @@ def build_context(state) -> dict:
         pass
 
     try:
+        orders = [{"symbol": o.symbol, "side": o.side, "qty": o.qty,
+                   "type": o.type, "limit": o.limit_price, "status": o.status}
+                  for o in broker.get_orders(open_only=True)]
+        ctx["pending_orders"] = orders[:15]
+    except Exception:
+        pass
+
+    try:
+        ctx["recent_fills"] = server._fills(broker)[::-1][:10]
+    except Exception:
+        pass
+
+    try:
+        # the transparent statement: per-instrument TOTALS + reconciliation.
+        # This is what lets the copilot answer "is my balance real?" with venue
+        # math (a large swing with no transfer = a paper adjustment, flagged).
+        from . import statement
+        a = broker.get_account()
+        acts = broker.account_activities(pages=2)
+        pos_d = [p.to_dict(p.v_last if p.v_last is not None else p.avg_price)
+                 for p in broker.get_positions()]
+        st = statement.build(acts, pos_d, _f(a.get("equity")),
+                             _f(a.get("last_equity")))
+        ctx["statement"] = {
+            "totals": st["totals"],
+            "reconciliation": st["reconciliation"],
+            "per_symbol_top": [
+                {"symbol": r["symbol"], "bought_usd": r["bought_usd"],
+                 "sold_usd": r["sold_usd"], "realized": r["realized"],
+                 "open_qty": r["open_qty"], "unrealized": r["unrealized"]}
+                for r in st["per_symbol"][:8]],
+            "cash_events_recent": st["cash_events"][:6]}
+    except Exception:
+        pass
+
+    try:
         p = state["planstore"].latest() if state.get("planstore") else None
         if p:
+            def _idea(i):
+                d = {"side": i["side"], "symbol": i["symbol"],
+                     "strategy": i.get("strategy"), "dsr": i.get("dsr"),
+                     "auto_tradable": bool(i.get("verified")),
+                     "action": i.get("action", "open"),
+                     "asset_class": i.get("asset_class"),
+                     "entry": i.get("entry"), "stop": i.get("stop"),
+                     "target": i.get("target"), "qty": i.get("qty")}
+                sp = i.get("structure")
+                if isinstance(sp, dict):        # sized option structure
+                    d["option_structure"] = {
+                        "preset": sp.get("preset"), "flow": sp.get("flow"),
+                        "contracts": sp.get("contracts"),
+                        "max_loss_total": sp.get("total_max_loss"),
+                        "max_profit_total": sp.get("total_max_profit"),
+                        "expiration": sp.get("expiration")}
+                if i.get("exposure_change"):
+                    d["exposure_change"] = i["exposure_change"]
+                return d
             ctx["today_plan"] = {
                 "date": p.get("date"), "status": p.get("status"),
                 "posture": p.get("posture"), "notes": p.get("notes"),
-                "ideas": [{"side": i["side"], "symbol": i["symbol"],
-                           "strategy": i.get("strategy"),
-                           "dsr": i.get("dsr"),
-                           "auto_tradable": bool(i.get("verified")),
-                           "entry": i.get("entry"), "stop": i.get("stop"),
-                           "target": i.get("target"), "qty": i.get("qty")}
-                          for i in p.get("ideas", [])],
+                "ideas": [_idea(i) for i in p.get("ideas", [])],
+                "holds_not_traded": p.get("holds", []),
+                "option_ideas_skipped": p.get("opt_skipped", []),
                 "execution": p.get("execution")}
+    except Exception:
+        pass
+
+    try:
+        at = state.get("autotrader")
+        if at:
+            ctx["managed_positions"] = [
+                {"symbol": m["symbol"], "kind": m["kind"], "side": m["side"],
+                 "qty": m["qty"], "entry": m["entry"], "stop": m["stop"],
+                 "target": m["target"], "strategy": m.get("strategy"),
+                 "expiration": m.get("expiration") or None}
+                for m in at.open_positions()[:12]]
+    except Exception:
+        pass
+
+    try:
+        st_ = state["daemon"].status()
+        ctx["agents"] = {"master": st_["master"],
+                         "roster": [{"name": x["name"], "on": x["enabled"],
+                                     "last": (x["last_message"] or "")[:100]}
+                                    for x in st_["agents"]]}
+    except Exception:
+        pass
+
+    try:
+        import os as _os
+        ctx["day_guard"] = {
+            "day_baseline": round(_f(getattr(broker, "day_open_equity", 0)), 2),
+            "day_loss_limit_pct": float(_os.environ.get("QTSYS_DAY_LOSS_LIMIT",
+                                                        "-0.05")) * 100,
+            "halt_kind": getattr(gw, "halt_kind", "")}
+    except Exception:
+        pass
+
+    try:
+        from . import universe
+        top = (universe.load_last_result("1Day") or {}).get("setups", [])
+        ctx["top_scan_setups"] = [
+            {"symbol": s.get("asset"), "side": s.get("side"),
+             "strategy": s.get("strategy"), "family": s.get("family"),
+             "hist_exp": s.get("hist_exp")} for s in top[:6]]
     except Exception:
         pass
 
@@ -155,7 +247,20 @@ SYSTEM = (
     "- 'Unrealised' P&L is on OPEN positions; 'realised' is on CLOSED trades; "
     "'day P&L' is the whole account since the prior close — keep them distinct.\n"
     "- The auto-trader only trades DSR-verified ideas at/above the operator's "
-    "threshold; others go to the proposal inbox."
+    "threshold; others go to the proposal inbox.\n"
+    "- 'statement' is the venue-ledger truth: per-instrument bought/sold totals "
+    "and a reconciliation; if reconciliation.reset_suspected is true, the "
+    "balance swing is a venue paper-account adjustment, NOT trading P&L — say "
+    "so plainly when asked whether the balance is real.\n"
+    "- 'pending_orders' are working (unfilled) orders; 'recent_fills' are "
+    "executions; 'managed_positions' are what the auto-trader itself runs "
+    "(kind 'ospread' = a defined-risk option structure with stop/target in "
+    "value terms).\n"
+    "- 'today_plan.holds_not_traded' are names the planner deliberately did "
+    "NOT re-buy (already at target / flip needs a human); an idea with action "
+    "'increase' is a planner-authorised add sized to the delta only.\n"
+    "- 'agents' is the desk roster and what each agent last did; 'day_guard' "
+    "is the daily-loss kill switch (baseline + limit)."
 )
 
 
