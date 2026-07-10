@@ -1797,15 +1797,17 @@ def audit():
 @app.get("/api/reports")
 def reports_list():
     """Journals/reports the agents have filed to reports/ (briefings, risk,
-    daily wraps)."""
+    daily wraps).  Sorted by file date, newest first."""
     d = os.path.join(HERE, "reports")
     out = []
     if os.path.isdir(d):
-        for fn in sorted(os.listdir(d), reverse=True):
-            if fn.endswith(".txt"):
-                fp = os.path.join(d, fn)
-                out.append({"name": fn, "ts": os.path.getmtime(fp),
-                            "size": os.path.getsize(fp)})
+        files = [fn for fn in os.listdir(d) if fn.endswith(".txt")]
+        files.sort(key=lambda fn: os.path.getmtime(os.path.join(d, fn)),
+                   reverse=True)
+        for fn in files:
+            fp = os.path.join(d, fn)
+            out.append({"name": fn, "ts": os.path.getmtime(fp),
+                        "size": os.path.getsize(fp)})
     return {"reports": out}
 
 
@@ -1954,6 +1956,75 @@ def agent_log(limit: int = 60): return state["daemon"].recent_log(limit)
 
 @app.get("/api/fills")
 def fills(): return _fills(state["broker"])[::-1][:50]
+
+
+@app.get("/api/fills/all")
+async def fills_all(after: str = "", before: str = ""):
+    """Full fill history with optional date range filtering.
+    after/before: YYYY-MM-DD strings."""
+    def _load():
+        raw = []
+        broker = state["broker"]
+        if hasattr(broker, "all_fills"):
+            raw = broker.all_fills(after=after or None, before=before or None)
+        else:
+            raw = _fills(broker)[::-1]
+        return raw
+    data = await asyncio.to_thread(_load)
+    return {"fills": data, "n": len(data), "after": after, "before": before}
+
+
+@app.get("/api/fills/export")
+async def fills_export(fmt: str = "csv", after: str = "", before: str = ""):
+    """Download the full fill history as CSV or Markdown."""
+    from fastapi.responses import Response
+    def _load():
+        broker = state["broker"]
+        if hasattr(broker, "all_fills"):
+            return broker.all_fills(after=after or None, before=before or None)
+        return _fills(broker)[::-1]
+    data = await asyncio.to_thread(_load)
+    if fmt == "md":
+        lines = ["# Filled Orders — Executed Trades", ""]
+        if after or before:
+            lines.append(f"Date range: {after or 'start'} → {before or 'now'}")
+            lines.append("")
+        lines.append(f"Total fills: {len(data)}")
+        lines.append("")
+        lines.append("| Date | Side | Qty | Instrument | Price | Notional |")
+        lines.append("|------|------|-----|------------|-------|----------|")
+        for f in data:
+            ts = ""
+            if f.get("ts"):
+                import datetime
+                ts = datetime.datetime.fromtimestamp(f["ts"]).strftime("%Y-%m-%d %H:%M")
+            elif f.get("filled_at"):
+                ts = str(f["filled_at"])[:16]
+            q = float(f.get("qty", 0))
+            px = float(f.get("price", 0))
+            notional = q * px if px else 0
+            lines.append(f"| {ts} | {(f.get('side', '')).upper()} | {q:g} | "
+                         f"{f.get('symbol', '')} | {px:.4f} | ${notional:,.0f} |")
+        body = "\n".join(lines)
+        return Response(content=body, media_type="text/markdown",
+                        headers={"Content-Disposition": "attachment; filename=qtsys_fills.md"})
+    # CSV
+    import csv, io
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["date", "side", "qty", "symbol", "price", "notional"])
+    for f in data:
+        ts = ""
+        if f.get("ts"):
+            import datetime
+            ts = datetime.datetime.fromtimestamp(f["ts"]).strftime("%Y-%m-%d %H:%M")
+        elif f.get("filled_at"):
+            ts = str(f["filled_at"])[:16]
+        q = float(f.get("qty", 0))
+        px = float(f.get("price", 0))
+        w.writerow([ts, f.get("side", ""), q, f.get("symbol", ""), px, round(q * px, 2)])
+    return Response(content=buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=qtsys_fills.csv"})
 
 
 def _do_action(kind: str) -> str:
@@ -2198,6 +2269,80 @@ async def account_statement():
     return await asyncio.to_thread(_calc)
 
 
+@app.get("/api/statement/export")
+async def statement_export(fmt: str = "csv"):
+    """Download the full account statement as CSV or Markdown."""
+    from . import statement as stmt_mod
+    from fastapi.responses import Response
+    broker = state["broker"]
+    if not hasattr(broker, "account_activities"):
+        raise HTTPException(400, "statement needs the Alpaca venue")
+
+    def _calc():
+        acts = broker.account_activities()
+        pos = []
+        for p in broker.get_positions():
+            d = p.to_dict(p.v_last if p.v_last is not None else p.avg_price)
+            pos.append(d)
+        a = broker.get_account()
+        return stmt_mod.build(acts, pos, float(a.get("equity") or 0),
+                              float(a.get("last_equity") or 0))
+    st = await asyncio.to_thread(_calc)
+    rows = st.get("per_symbol", [])
+    t = st.get("totals", {})
+    rec = st.get("reconciliation", {})
+
+    if fmt == "md":
+        lines = ["# Account Statement", ""]
+        lines.append(f"As of: {st.get('as_of', '')}")
+        lines.append(f"Equity: ${st.get('equity', 0):,.2f} | "
+                     f"Prior close: ${st.get('prior_close_equity', 0):,.2f} | "
+                     f"Day change: ${st.get('day_change', 0):,.2f}")
+        lines.append("")
+        if rec.get("reset_suspected"):
+            lines.append(f"> ⚠ {rec.get('note', '')}")
+            lines.append("")
+        lines.append("## Per-Instrument Totals")
+        lines.append("")
+        lines.append("| Instrument | Fills | Bought $ | Sold $ | Realised | Open qty | Unrealised | Net total | Last activity |")
+        lines.append("|------------|-------|----------|--------|----------|----------|------------|-----------|---------------|")
+        for r in rows:
+            lines.append(f"| {r['symbol']} | {r['n_fills']} | ${r['bought_usd']:,.0f} | "
+                         f"${r['sold_usd']:,.0f} | ${r['realized']:,.2f} | {r['open_qty']} | "
+                         f"${r['unrealized']:,.2f} | ${r['net_total']:,.2f} | {r['last_activity']} |")
+        lines.append("")
+        lines.append("## Totals")
+        lines.append(f"- Realised (ledger): ${t.get('realized_all_ledger', 0):,.2f}")
+        lines.append(f"- Unrealised (open): ${t.get('unrealized_open', 0):,.2f}")
+        lines.append(f"- Transfers: ${t.get('transfers', 0):,.2f}")
+        lines.append(f"- Fees: ${t.get('fees', 0):,.2f}")
+        lines.append(f"- Income: ${t.get('income', 0):,.2f}")
+        events = st.get("cash_events", [])
+        if events:
+            lines.append("")
+            lines.append("## Cash Events")
+            lines.append("")
+            lines.append("| Date | Type | Amount | Description |")
+            lines.append("|------|------|--------|-------------|")
+            for e in events:
+                lines.append(f"| {e['date']} | {e['type']} | ${e['net']:,.2f} | {e['desc']} |")
+        body = "\n".join(lines)
+        return Response(content=body, media_type="text/markdown",
+                        headers={"Content-Disposition": "attachment; filename=qtsys_statement.md"})
+    # CSV
+    import csv, io
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["symbol", "n_fills", "bought_usd", "sold_usd", "realized",
+                "open_qty", "unrealized", "net_total", "last_activity"])
+    for r in rows:
+        w.writerow([r["symbol"], r["n_fills"], r["bought_usd"], r["sold_usd"],
+                    r["realized"], r["open_qty"], r["unrealized"],
+                    r["net_total"], r["last_activity"]])
+    return Response(content=buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=qtsys_statement.csv"})
+
+
 @app.get("/api/closed")
 def closed_positions():
     """Closed positions / realised round-trips reconstructed from the fill
@@ -2207,7 +2352,7 @@ def closed_positions():
     trips = tracking.realised_roundtrips(_fills(state["broker"]),
                                          lambda s: _cls_of(s) or "Equity")
     wins = [t for t in trips if t["pnl"] > 0]
-    return {"trades": trips[:80], "n": len(trips),
+    return {"trades": trips, "n": len(trips),
             "realised_pnl": round(sum(t["pnl"] for t in trips), 2),
             "win_rate": round(len(wins) / len(trips), 3) if trips else None}
 

@@ -380,6 +380,51 @@ class AlpacaBroker(Broker):
         except Exception:
             return []
 
+    def all_fills(self, after: str | None = None,
+                  before: str | None = None) -> list[dict]:
+        """Full fill history with pagination, optionally filtered by date range.
+        after/before: 'YYYY-MM-DD' strings (inclusive)."""
+        try:
+            from alpaca.trading.requests import GetOrdersRequest
+            from alpaca.trading.enums import QueryOrderStatus
+            from datetime import datetime
+            kw: dict = {"status": QueryOrderStatus.CLOSED, "limit": 500}
+            if after:
+                kw["after"] = datetime.strptime(after, "%Y-%m-%d")
+            if before:
+                kw["until"] = datetime.strptime(before, "%Y-%m-%d").replace(
+                    hour=23, minute=59, second=59)
+            out: list[dict] = []
+            seen: set[str] = set()
+            for page in range(20):                     # safety cap: 20 pages
+                req = GetOrdersRequest(**kw)
+                batch = self.c.get_orders(filter=req)
+                if not batch:
+                    break
+                for o in batch:
+                    oid = str(o.id)
+                    if oid in seen:
+                        continue
+                    seen.add(oid)
+                    if not o.filled_qty or float(o.filled_qty) == 0 \
+                            or not o.filled_avg_price:
+                        continue
+                    out.append({"symbol": o.symbol, "side": o.side.value,
+                                "qty": float(o.filled_qty),
+                                "price": float(o.filled_avg_price),
+                                "ts": o.filled_at.timestamp()
+                                      if o.filled_at else 0.0})
+                if len(batch) < 500:
+                    break
+                # page via the oldest order's created_at
+                oldest = min(batch, key=lambda x: x.created_at or
+                             datetime.min)
+                kw["until"] = oldest.created_at
+            out.sort(key=lambda x: x["ts"], reverse=True)
+            return out
+        except Exception:
+            return self.recent_fills()
+
     def get_quote(self, symbol: str) -> float:
         if "/" in symbol:   # crypto pair, e.g. "BTC/USD"
             t = self.dc.get_crypto_latest_trade(

@@ -1369,7 +1369,7 @@
       ["GOLD", "Gold — real monthly 1833→", "Monthly — page-only", false],
       ["SPX", "S&P 500 — real monthly 1871→ (Shiller)", "Monthly — page-only", false]];
     const META = Object.fromEntries(UNIVERSE.map(([s, n, c, tr]) => [s, { name: n, cls: c, tradable: tr }]));
-    const CLASSES = ["Commodity", "Crypto", "FX", "Index — analyse-only", "Monthly — page-only"];
+    const CLASSES = ["Equity", "Commodity", "Crypto", "FX", "Index — analyse-only", "Monthly — page-only"];
     const MONTHLY = new Set(["GOLD", "SPX"]); const REPLAY = 250;
     const LIMITS = { max_order_notional: 60000, max_position_notional: 120000, max_gross_leverage: 2.0, price_band: 0.10 };
 
@@ -1403,6 +1403,12 @@
       dataFields: null, dataSyms: "AAPL, MSFT, NVDA, BTC/USD",
       dataSel: ["last", "chg_pct", "rsi14", "mom_252", "pe", "sector"], dataRows: null, dataBusy: false,
       launch: null, _lpdrag: null,
+      riskAttr: null,            // /api/risk/attribution cache
+      portFillsView: "all", portFillsVal: "",
+      portClosedView: "all", portClosedVal: "",
+      portStmtView: "all", portStmtVal: "",
+      fillsAll: null,            // full fill history from /api/fills/all
+      fillsRange: { after: "", before: "" },
     };
     S.filings = {}; S.filingSum = {};
     S.l2 = {}; S._l2load = {};
@@ -1680,6 +1686,7 @@
           S._closedTs = Date.now();
           j("/api/closed").then(c => { if (c) S.closed = c; if (S.page === "portfolio") render() }).catch(() => { });
           j("/api/statement").then(c => { if (c) S.statement = c; if (S.page === "portfolio") render() }).catch(() => { });
+          j("/api/risk/attribution").then(r => { if (r) { S.riskAttr = r; if (S.page === "risk") render() } }).catch(() => { });
         }
         j("/api/alerts").then(al => {
           if (!S._alertInit) { S._alertInit = true; S._alertSeen = al.feed.length; }
@@ -2166,8 +2173,14 @@
     function chgOf(s) { const q = S.quotes[s]; if (!q || !q.prevClose) return 0; return (q.last / q.prevClose - 1) * 100 }
 
     function vMarkets() {
-      let h = "";
+      const freshAge = S._lastOk ? Math.round((Date.now() - S._lastOk) / 1000) : null;
+      const freshStr = freshAge != null ? (freshAge < 5 ? "just now" : freshAge + "s ago") : "—";
+      const freshCls = freshAge != null && freshAge < 8 ? "up" : "dn";
+      let h = `<div class="panel"><div class="pb" style="display:flex;justify-content:space-between;align-items:center;font-size:11px">
+    <span class="mut">Live venue quotes · auto-refreshing every 3s</span>
+    <span class="pill ${freshCls}" style="font-size:10px">updated ${freshStr}</span></div></div>`;
       for (const c of CLASSES) {
+        if (c === "Equity") continue;   // equities are per-position, shown in PORT
         const rows = UNIVERSE.filter(u => u[2] === c); if (!rows.length) continue;
         h += `<div class="panel"><div class="ph">${c === "Crypto" ? "Crypto <span class='pill up'>24/7</span>" : esc(c)}
       <span class="right mut">${rows.length} instruments</span></div>
@@ -2617,6 +2630,37 @@
     }
 
     function vPortfolio() {
+      // --- view toggle + select helper ---
+      function viewSeg(pfx, dts) {
+        const view = S[pfx + "View"], val = S[pfx + "Val"];
+        const btns = ["day", "month", "year", "all"].map(v =>
+          `<button class="portViewBtn${view === v ? " on" : ""}" data-portview="${pfx}:${v}">${v === "all" ? "HISTORY" : v.toUpperCase()}</button>`).join("");
+        let sel = "";
+        if (view !== "all") {
+          let opts = [];
+          if (view === "day") opts = [...new Set(dts.map(d => d.toDateString()))];
+          else if (view === "month") opts = [...new Set(dts.map(d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`))];
+          else if (view === "year") opts = [...new Set(dts.map(d => d.getFullYear().toString()))];
+          if (view === "day") opts.sort((a,b) => new Date(b) - new Date(a));
+          else opts.sort().reverse();
+          if (opts.length && !opts.includes(val)) S[pfx + "Val"] = opts[0];
+          const curVal = S[pfx + "Val"]; // re-read
+          if (opts.length) {
+            sel = `<select data-portval="${pfx}" style="margin-left:4px;padding:2px;background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:4px;outline:none">` +
+              opts.map(o => `<option value="${o}" ${curVal === o ? "selected" : ""}>${o}</option>`).join("") +
+              `</select>`;
+          }
+        }
+        return `<span class="seg" style="margin-right:8px">${btns}</span>${sel}`;
+      }
+      const _dOk = (d, pfx) => {
+        const view = S[pfx + "View"], val = S[pfx + "Val"];
+        if (view === "all" || !d) return true;
+        if (view === "day") return d.toDateString() === val;
+        if (view === "month") return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}` === val;
+        if (view === "year") return d.getFullYear().toString() === val;
+        return true;
+      };
       const a = S.account;
       // sum the OPEN positions' unrealised — this is what the positions box totals,
       // and is a different thing from Day P&L (account move since prior close, which
@@ -2661,7 +2705,6 @@
       }
       h += "</tbody></table></div>";
 
-      // pending = every OPEN order the venue is holding (any live/demo working status)
       const PENDING = new Set(["working", "new", "accepted", "pending_new", "partially_filled", "held", "pending_replace", "accepted_for_bidding"]);
       const pending = S.orders.filter(o => PENDING.has(o.status));
       h += `<div class="panel"><div class="ph">Pending orders <span class="right"><span class="pill working">${pending.length} PENDING</span></span></div>
@@ -2677,11 +2720,18 @@
       }
       h += "</tbody></table></div>";
 
-      // filled = executed venue trades (buys AND sells), most recent first
-      let cum = 0;
-      h += `<div class="panel"><div class="ph">Filled orders · executed trades <span class="right mut">${S.fills.length} recent</span></div>
+      const fDates = S.fills.map(f => f.ts ? new Date(f.ts * 1000) : (f.filled_at ? new Date(f.filled_at) : null)).filter(Boolean);
+      const vFills = viewSeg("portFills", fDates);
+      h += `<div class="panel"><div class="ph">Filled orders · executed trades
+    <span class="right" style="display:flex;gap:4px;align-items:center">${vFills}
+      <span class="mut">${S.fills.length} recent</span>
+      <button class="btn tiny ghost" id="fillsDlCsv" title="Download full fill history as CSV">⬇ CSV</button>
+      <button class="btn tiny ghost" id="fillsDlMd" title="Download full fill history as Markdown">⬇ MD</button>
+    </span></div>
     <table><thead><tr><th>Filled</th><th>Side</th><th>Qty</th><th>Instrument</th><th>Price</th><th>Notional</th></tr></thead><tbody>`;
-      for (const f of S.fills.slice(0, 20)) {
+      // filter fills by view
+      const filteredFills = S.fills.filter(f => _dOk(f.ts ? new Date(f.ts * 1000) : (f.filled_at ? new Date(f.filled_at) : null), "portFills"));
+      for (const f of filteredFills) {
         const q = +f.qty, qs = fmt(q, qd(q));
         const when = f.ts ? new Date(f.ts * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : (f.filled_at ? String(f.filled_at).slice(5, 16).replace("T", " ") : "—");
         const notional = f.price ? q * f.price : null;
@@ -2692,15 +2742,23 @@
       <td class="num">${fmt(f.price, pxd(f.symbol))}</td>
       <td class="num">${notional != null ? money(notional, 0) : "—"}</td></tr>`
       }
-      if (!S.fills.length) h += `<tr><td colspan="6" class="mut">No venue fills yet. Filled orders (buys and sells) appear here as they execute.</td></tr>`;
-      h += `</tbody></table><div class="note">Pending = resting/unfilled orders (cancellable). Filled = trades the venue actually executed, both entries (BUY) and exits (SELL).</div></div>`;
+      if (!filteredFills.length) h += `<tr><td colspan="6" class="mut">${S.fills.length ? "No fills for this period." : "No venue fills yet. Filled orders (buys and sells) appear here as they execute."}</td></tr>`;
+      h += `</tbody></table><div class="note">Pending = resting/unfilled orders (cancellable). Filled = trades the venue actually executed, both entries (BUY) and exits (SELL). Use the toggle to filter by day/month/year. Download exports the FULL history from the venue.</div></div>`;
 
       // closed positions = realised round-trips (entry+exit paired from fills)
       const cl = S.closed || { trades: [] };
+      const cDates = (cl.trades || []).map(t => t.closed_ts ? new Date(t.closed_ts * 1000) : null).filter(Boolean);
+      const vClosed = viewSeg("portClosed", cDates);
+
+      const filteredTrips = (cl.trades || []).filter(t => _dOk(t.closed_ts ? new Date(t.closed_ts * 1000) : null, "portClosed"));
+      const filtTripsPnl = filteredTrips.reduce((s, t) => s + t.pnl, 0);
+      const filtTripsWins = filteredTrips.filter(t => t.pnl > 0).length;
       h += `<div class="panel"><div class="ph">Closed positions · realised P&L
-    <span class="right mut">${cl.n || 0} round-trips${cl.win_rate != null ? " · win " + Math.round(cl.win_rate * 100) + "%" : ""}${cl.realised_pnl != null ? " · net <b class='" + cls(cl.realised_pnl) + "'>" + signed(cl.realised_pnl, 2) + "</b>" : ""}</span></div>
+    <span class="right" style="display:flex;gap:4px;align-items:center">${vClosed}
+      <span class="mut" style="margin-left:8px">${filteredTrips.length} round-trips${filteredTrips.length ? " · win " + Math.round(filtTripsWins / filteredTrips.length * 100) + "%" : ""}${filteredTrips.length ? " · net <b class='" + cls(filtTripsPnl) + "'>" + signed(filtTripsPnl, 2) + "</b>" : ""}</span>
+    </span></div>
     <table><thead><tr><th>Closed</th><th>Side</th><th>Qty</th><th>Instrument</th><th>Entry</th><th>Exit</th><th>P&L</th><th>P&L %</th></tr></thead><tbody>`;
-      for (const t of (cl.trades || []).slice(0, 30)) {
+      for (const t of filteredTrips) {
         const when = t.closed_ts ? new Date(t.closed_ts * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
         h += `<tr class="rowlink" data-sym="${esc(t.symbol)}"><td class="mut">${when}</td>
       <td><span class="pill ${t.side === "long" ? "up" : "dn"}">${t.side.toUpperCase()}</span></td>
@@ -2711,18 +2769,27 @@
       <td class="num ${cls(t.pnl)}" style="font-weight:700">${signed(t.pnl, 2)}</td>
       <td class="num ${cls(t.pnl)}">${pct(t.pnl_pct)}</td></tr>`
       }
-      if (!(cl.trades || []).length) h += `<tr><td colspan="8" class="mut">No closed round-trips yet — a position becomes a closed trade once its entry and a matching exit fill are paired.</td></tr>`;
+      if (!filteredTrips.length) h += `<tr><td colspan="8" class="mut">${(cl.trades || []).length ? "No closed trades for this period." : "No closed round-trips yet — a position becomes a closed trade once its entry and a matching exit fill are paired."}</td></tr>`;
       h += `</tbody></table><div class="note">Each row pairs an entry with its exit (FIFO/VWAP), net of round-trip fees. Realised P&L is locked in; the Positions box above shows OPEN unrealised.</div></div>`;
 
       // account statement: per-instrument TOTALS + cash events + reconciliation
       const st = S.statement;
       if (st) {
         const rec = st.reconciliation || {};
+        const sDates = (st.per_symbol || []).map(r => r.last_activity ? new Date(r.last_activity.replace(" ", "T") + ":00Z") : null).filter(Boolean);
+        const vStmt = viewSeg("portStmt", sDates);
+
         h += `<div class="panel"><div class="ph">Account statement · per-instrument totals
-      <span class="right mut">as of ${esc(st.as_of || "")} · equity ${money(st.equity, 0)} vs prior close ${money(st.prior_close_equity, 0)}</span></div>`;
+      <span class="right" style="display:flex;gap:4px;align-items:center">${vStmt}
+        <span class="mut" style="margin-left:8px;margin-right:8px">as of ${esc(st.as_of || "")} · equity ${money(st.equity, 0)} vs prior close ${money(st.prior_close_equity, 0)}</span>
+        <button class="btn tiny ghost" id="stmtDlCsv" title="Download statement as CSV">⬇ CSV</button>
+        <button class="btn tiny ghost" id="stmtDlMd" title="Download statement as Markdown">⬇ MD</button>
+      </span></div>`;
         if (rec.reset_suspected) h += `<div class="note" style="border-color:var(--dn);font-size:11.5px"><b>⚠ VENUE ADJUSTMENT DETECTED:</b> ${esc(rec.note || "")}</div>`;
+        // filter statement per_symbol by view
+        const stRows = (st.per_symbol || []).filter(r => _dOk(r.last_activity ? new Date(r.last_activity.replace(" ", "T") + ":00Z") : null, "portStmt"));
         h += `<div style="overflow-x:auto"><table><thead><tr><th>Instrument</th><th>Fills</th><th>Bought</th><th>Sold</th><th>Realised</th><th>Open qty</th><th>Unrealised</th><th>Net total</th><th>Last</th></tr></thead><tbody>`;
-        for (const r of (st.per_symbol || []).slice(0, 20)) {
+        for (const r of stRows) {
           h += `<tr class="rowlink" data-sym="${esc(r.symbol)}"><td><span class="sym">${esc(r.symbol)}</span></td>
         <td class="num mut">${r.n_fills}</td>
         <td class="num">${money(r.bought_usd, 0)}<br><span class="mut" style="font-size:9.5px">${r.bought_qty}</span></td>
@@ -2742,7 +2809,7 @@
       <span class="mut">fees <b class="dn">${signed(t.fees, 2)}</b></span>
       <span class="mut">income <b>${signed(t.income, 2)}</b></span>
       <span class="mut">day swing <b class="${cls(st.day_change)}">${signed(st.day_change, 2)}</b> — of which trading/marks <b>${signed(rec.attributed_to_trading_and_marks, 2)}</b></span></div>`;
-        const ev = (st.cash_events || []).slice(0, 10);
+        const ev = (st.cash_events || []).slice(0, 20);
         if (ev.length) {
           h += `<div class="pb" style="border-top:1px dashed var(--line)"><div class="mut" style="font-size:10.5px;margin-bottom:4px">Cash events (non-trade): deposits, journals, fees, dividends</div>`;
           for (const e of ev) h += `<div class="logline"><span class="t">${esc(e.date)}</span><span class="m"><span class="pill ${e.net >= 0 ? "up" : "dn"}" style="min-width:44px;text-align:center">${esc(e.type)}</span> ${signed(e.net, 2)} · <span class="mut">${esc(e.desc)}</span></span></div>`;
@@ -2758,11 +2825,64 @@
       const ladder = [["0–5%", 1, "100%"], ["5–8%", 0.6, "60%"], ["8–12%", 0.3, "30%"], ["≥12%", 0, "KILL"]];
       const li = dd < 5 ? 0 : dd < 8 ? 1 : dd < 12 ? 2 : 3;
       const exp = {}; for (const p of S.positions) {
-        const c = META[p.symbol]?.cls || "Other";
+        const c = META[p.symbol]?.cls || "Equity";
         const last = (p.last ?? S.quotes[p.symbol]?.last ?? p.avg_cost);
         exp[c] = (exp[c] || 0) + Math.abs((p.mkt_value != null ? p.mkt_value : p.qty * last))
       }
       const gmax = Math.max(1, ...Object.values(exp));
+      const expClasses = CLASSES.filter(c => (exp[c] || 0) > 0);
+      const nn = (x, d = 4) => x == null ? "—" : (+x * 100).toFixed(d > 2 ? 2 : d) + "%";
+      const ra = S.riskAttr;                       // from /api/risk/attribution
+      let riskPanels = "";
+
+      // --- VaR / CVaR panel ---
+      if (ra && ra.var) {
+        const v = ra.var;
+        riskPanels += `<div class="panel"><div class="ph">Value at Risk · live book <span class="right mut">historical simulation on real returns</span></div>
+    <div class="pb grid3">
+      <div class="stat"><div class="k">VaR 99%</div><div class="v num dn">${nn(v.var99)}</div></div>
+      <div class="stat"><div class="k">CVaR 99%</div><div class="v num dn">${nn(v.cvar99)}</div></div>
+      <div class="stat"><div class="k">VaR 95%</div><div class="v num">${nn(v.var95)}</div></div>
+      <div class="stat"><div class="k">CVaR 95%</div><div class="v num">${nn(v.cvar95)}</div></div>
+    </div>
+    <div class="note">1-day VaR/CVaR from historical simulation on the live book's REAL return history. CVaR = expected loss in the tail.</div></div>`;
+      }
+
+      // --- Factor exposures panel ---
+      if (ra && ra.factors && ra.factors.factors && ra.factors.factors.length) {
+        const fx = ra.factors;
+        riskPanels += `<div class="panel"><div class="ph">Factor exposures · OLS on real data
+    <span class="right mut">R² ${fx.r2 != null ? (fx.r2 * 100).toFixed(0) + "%" : "—"} · idio ${fx.idio_pct != null ? fx.idio_pct.toFixed(0) + "%" : "—"}</span></div>
+    <table><thead><tr><th>Factor</th><th>β</th><th>t-stat</th><th>Var share %</th></tr></thead><tbody>
+    ${fx.factors.map(f => `<tr><td><b>${esc(f.factor)}</b></td>
+      <td class="num ${f.beta >= 0 ? "up" : "dn"}">${f.beta >= 0 ? "+" : ""}${f.beta.toFixed(3)}</td>
+      <td class="num">${f.t.toFixed(1)}</td>
+      <td class="num">${f.var_share_pct.toFixed(1)}%</td></tr>`).join("")}
+    </tbody></table>
+    <div class="note">Observable real-data factors (ENERGY, CRYPTO, USD, RISKOFF). β = book sensitivity; t = statistical significance; var share = how much of book risk each factor explains.</div></div>`;
+      }
+
+      // --- Tail attribution panel ---
+      if (ra && ra.attribution && ra.attribution.rows && ra.attribution.rows.length) {
+        const att = ra.attribution;
+        riskPanels += `<div class="panel"><div class="ph">Risk attribution · tail-conditional
+    <span class="right mut">diversification ${att.diversification_ratio != null ? att.diversification_ratio + "×" : "—"}</span></div>
+    <table><thead><tr><th>Symbol</th><th>Weight</th><th>CVaR contrib</th><th>CVaR share %</th><th>Standalone VaR95</th></tr></thead><tbody>
+    ${att.rows.map(r => `<tr><td><span class="sym">${esc(r.symbol)}</span></td>
+      <td class="num">${r.weight >= 0 ? "+" : ""}${r.weight.toFixed(3)}</td>
+      <td class="num dn">${nn(r.cvar_contrib)}</td>
+      <td class="num">${r.cvar_share_pct != null ? r.cvar_share_pct.toFixed(1) + "%" : "—"}</td>
+      <td class="num">${nn(r.standalone_var95)}</td></tr>`).join("")}
+    </tbody></table>
+    <div class="note">Euler-consistent: contributions sum exactly to portfolio CVaR. Diversification ratio > 1.0 = risk is reduced by diversification.</div></div>`;
+      }
+
+      if (!riskPanels && S.positions.length) {
+        riskPanels = `<div class="panel"><div class="pb mut">Loading risk analytics… VaR, factor exposures, and attribution appear once the risk engine completes its first calculation.</div></div>`;
+      } else if (!riskPanels) {
+        riskPanels = `<div class="panel"><div class="pb mut">Book is flat — VaR, factor exposures, and attribution populate when positions are open.</div></div>`;
+      }
+
       return `
   <div class="panel"><div class="ph">Risk engine · live limits</div><div class="pb grid3">
     <div class="stat"><div class="k">Gross leverage</div><div class="v num ${a.leverage > 1.5 ? "dn" : ""}">${fmt(a.leverage, 2)}×</div>
@@ -2783,12 +2903,14 @@
     </tbody></table>
     <div class="note">Exposure falls as drawdown deepens — never the reverse. Sizing on losses is how accounts die.</div></div>
 
-  <div class="panel"><div class="ph">Exposure by asset class</div><div class="pb">
-    ${CLASSES.map(c => `<div style="display:flex;align-items:center;gap:10px;padding:4px 0">
-      <span style="width:70px" class="mut">${c}</span>
+  <div class="panel"><div class="ph">Exposure by asset class <span class="right mut">${S.positions.length} positions</span></div><div class="pb">
+    ${(expClasses.length ? expClasses : CLASSES.slice(0, 4)).map(c => `<div style="display:flex;align-items:center;gap:10px;padding:4px 0">
+      <span style="width:90px" class="mut">${c}</span>
       <div class="bar" style="flex:1"><i style="width:${((exp[c] || 0) / gmax * 100) | 0}%"></i></div>
       <span class="num" style="width:86px;text-align:right">${money(exp[c] || 0, 0)}</span></div>`).join("")}
   </div></div>
+
+  ${riskPanels}
 
   <div class="panel"><div class="ph">Kill switch</div><div class="pb" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
     <span class="pill ${S.halted ? "rejected" : "up"}">${S.halted ? "FIRED — HALTED" : "ARMED · CLEAR"}</span>
@@ -4076,10 +4198,30 @@
       if (rpr) { reportPrint(); return }
       const rep = e.target.closest("[data-report]");
       if (rep) { loadReport(rep.dataset.report); return }
+      // --- port view toggle + download buttons ---
+      const pv = e.target.closest("[data-portview]");
+      if (pv) { 
+        const [pfx, v] = pv.dataset.portview.split(":"); 
+        S[pfx + "View"] = v; 
+        render(); 
+        return; 
+      }
+      const fillsCsv = e.target.closest("#fillsDlCsv");
+      if (fillsCsv) { const a = document.createElement("a"); a.href = API + "/api/fills/export?fmt=csv"; a.download = "qtsys_fills.csv"; a.click(); toast("downloading fills CSV", "ok"); return }
+      const fillsMd = e.target.closest("#fillsDlMd");
+      if (fillsMd) { const a = document.createElement("a"); a.href = API + "/api/fills/export?fmt=md"; a.download = "qtsys_fills.md"; a.click(); toast("downloading fills MD", "ok"); return }
+      const stCsv = e.target.closest("#stmtDlCsv");
+      if (stCsv) { const a = document.createElement("a"); a.href = API + "/api/statement/export?fmt=csv"; a.download = "qtsys_statement.csv"; a.click(); toast("downloading statement CSV", "ok"); return }
+      const stMd = e.target.closest("#stmtDlMd");
+      if (stMd) { const a = document.createElement("a"); a.href = API + "/api/statement/export?fmt=md"; a.download = "qtsys_statement.md"; a.click(); toast("downloading statement MD", "ok"); return }
       const nv = e.target.closest("[data-nav]");
       if (nv) { nav(nv.dataset.nav); return }
       const cx = e.target.closest("[data-cancel]");
       if (cx) { cancelOrder(cx.dataset.cancel); return }
+    });
+    document.addEventListener("change", e => {
+      const pv = e.target.closest("[data-portval]");
+      if (pv) { S[pv.dataset.portval + "Val"] = pv.value; render(); return }
     });
     $("#killbtn").onclick = () => S.halted ? resumeTrading() : killSwitch();
     $("#cmd").addEventListener("keydown", e => { if (e.key === "Enter") { runCmd(e.target.value); e.target.value = "" } });
