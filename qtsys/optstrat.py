@@ -15,6 +15,9 @@ MULT = 100.0   # US equity option contract multiplier
 
 # preset -> list of (right, strike-picker, qty). strike-picker walks OTM steps
 # from ATM: 0 = nearest ATM, +k = k strikes above, -k = k below.
+# Spread WIDTH (strike steps between the long and short leg) is parametric:
+# width 2 is the default desk shape; width 1 is the narrowest the chain allows,
+# which shrinks max loss per contract — how a SMALL account affords structures.
 PRESETS = {
     "long_call":   [("call", 0, +1)],
     "long_put":    [("put", 0, +1)],
@@ -29,6 +32,23 @@ PRESETS = {
     "iron_condor": [("put", -1, -1), ("put", -3, +1),
                     ("call", +1, -1), ("call", +3, +1)],
 }
+
+
+def _preset_legs(preset: str, width: int | None) -> list | None:
+    """Leg spec for a preset at a given spread width (strike steps between the
+    bought and sold leg). None width = the PRESETS default shape."""
+    if width is None:
+        return PRESETS.get(preset)
+    w = max(1, int(width))
+    shapes = {
+        "bull_call":   [("call", 0, +1), ("call", +w, -1)],
+        "bear_put":    [("put", 0, +1), ("put", -w, -1)],
+        "bull_put":    [("put", -1, -1), ("put", -1 - w, +1)],
+        "bear_call":   [("call", +1, -1), ("call", +1 + w, +1)],
+        "iron_condor": [("put", -1, -1), ("put", -1 - w, +1),
+                        ("call", +1, -1), ("call", +1 + w, +1)],
+    }
+    return shapes.get(preset, PRESETS.get(preset))   # width-less presets unchanged
 LABEL = {"long_call": "Long call", "long_put": "Long put",
          "straddle": "Straddle", "strangle": "Strangle",
          "bull_call": "Bull call spread", "bear_put": "Bear put spread",
@@ -80,15 +100,22 @@ def _leg_payoff(leg, s_t):
     return qty * (intr - prem) * MULT
 
 
-def build(chain, spot, preset="straddle"):
-    """Assemble a preset. Returns None if the needed strikes aren't quotable."""
+def build(chain, spot, preset="straddle", width=None):
+    """Assemble a preset. Returns None if the needed strikes aren't quotable.
+    width (verticals/condors only): strike steps between the bought and sold
+    leg — width 1 is the narrowest structure the chain offers (smallest max
+    loss per contract, the small-account shape); None = default (2)."""
     if preset not in PRESETS or not chain or not spot:
         return None
     legs = []
-    for right, step, qty in PRESETS[preset]:
+    picked = set()
+    for right, step, qty in _preset_legs(preset, width):
         pk = _pick(chain, spot, right, step)
         if not pk:
             return None
+        if (right, pk["strike"]) in picked:      # clamped onto the same strike
+            return None                          # -> degenerate spread, refuse
+        picked.add((right, pk["strike"]))
         pk["qty"] = qty
         legs.append(pk)
     net_cost = sum(l["qty"] * l["mid"] * MULT for l in legs)     # +debit / -credit
@@ -158,6 +185,17 @@ def _selftest():
     assert select("bullish", "cheap") == "bull_call"
     assert select("neutral", "rich") == "iron_condor"
     assert select("big_move", "cheap") == "straddle"
+    # width fitting: a width-1 vertical is strictly narrower -> smaller max loss
+    bc_w2 = build(chain, 100.0, "bull_call")            # default width 2
+    bc_w1 = build(chain, 100.0, "bull_call", width=1)
+    assert bc_w1 and (bc_w1["legs"][1]["strike"] - bc_w1["legs"][0]["strike"]
+                      < bc_w2["legs"][1]["strike"] - bc_w2["legs"][0]["strike"])
+    assert abs(bc_w1["max_loss"]) < abs(bc_w2["max_loss"]), "narrower = cheaper risk"
+    ic_w1 = build(chain, 100.0, "iron_condor", width=1)
+    assert ic_w1 and len(ic_w1["legs"]) == 4
+    # degenerate (both legs clamp to the same strike) -> refused, not nonsense
+    tiny_chain = [mk(100)]
+    assert build(tiny_chain, 100.0, "bull_call", width=1) is None
     miss = build([{"strike": 100.0, "call": {"mid": None}, "put": {"mid": None}}],
                  100.0, "straddle")
     assert miss is None, "unquotable -> None, not a crash"

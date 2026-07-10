@@ -1514,14 +1514,26 @@ def _assemble_plan_data() -> dict:
     }
 
 
-def _vol_underlyings(plan: dict, cap: int = 6) -> list[str]:
+def _vol_underlyings(plan: dict, cap: int = 6, equity: float = 0.0) -> list[str]:
     """Liquid optionable names for the vol scan: the plan's equity ideas first,
     then a configurable watchlist of deep-chain names. Crypto/options symbols
-    are excluded (no equity option chain)."""
+    are excluded (no equity option chain).
+
+    SMALL ACCOUNTS (equity < QTSYS_SMALL_ACCT, default $3000) scan CHEAP liquid
+    underlyings instead of index names: a $10-30 stock with $0.5/$1 strikes
+    yields verticals risking $30-100/contract, so even a ~$250 book can trade
+    a fully defined-risk structure. Index options (SPY ~$500+/contract max loss)
+    are out of reach and would just be skipped."""
     import re
     _opt = re.compile(r"^[A-Z]{1,6}\d{6}[CP]\d{8}$")
-    watch = [s.strip().upper() for s in os.environ.get(
-        "QTSYS_VOL_WATCH", "SPY,QQQ,AAPL,NVDA,MSFT,TSLA,AMD,META").split(",") if s.strip()]
+    small = equity and equity < float(os.environ.get("QTSYS_SMALL_ACCT", "3000"))
+    if small:
+        watch = [s.strip().upper() for s in os.environ.get(
+            "QTSYS_VOL_WATCH_SMALL",
+            "F,SOFI,SNAP,AAL,T,INTC,PFE,NIO,PLUG,BAC").split(",") if s.strip()]
+    else:
+        watch = [s.strip().upper() for s in os.environ.get(
+            "QTSYS_VOL_WATCH", "SPY,QQQ,AAPL,NVDA,MSFT,TSLA,AMD,META").split(",") if s.strip()]
     # LIQUID names first: microcaps carry stale/garbage option quotes that
     # produce nonsense IV and mispriced structures. Plan equity ideas are only
     # added after the deep-chain watchlist.
@@ -1543,7 +1555,8 @@ def _option_structure_ideas(data: dict, plan: dict) -> list[dict]:
     if not hasattr(broker, "option_chain"):
         return []
     from . import optvol
-    unders = _vol_underlyings(plan)
+    equity = float(data.get("equity") or 0)
+    unders = _vol_underlyings(plan, equity=equity)
     if not unders:
         return []
     # directional views from the drafted equity ideas -> credit vs debit choice
@@ -1574,11 +1587,17 @@ def _option_structure_ideas(data: dict, plan: dict) -> list[dict]:
     ideas = optvol.ideas(unders, chain_of, bars_of, directional=directional,
                          max_ideas=int(os.environ.get("QTSYS_VOL_MAX", "3")))
     # per-structure risk budget = max loss we'll allocate to one options trade.
-    # Defined-risk index structures cost ~$300-2000/contract, so on a small
-    # account 1% of equity can't afford one — the sizer will (correctly) decline
-    # and the skip is surfaced in plan["opt_skipped"]. Operator-tunable.
-    budget = float(data.get("equity") or 0) * float(
-        os.environ.get("QTSYS_AT_OPT_RISK_PCT", "0.03"))
+    # SMALL-ACCOUNT GROWTH MODE: a percent of tiny equity rounds to nothing
+    # ($250 x 3% = $7.50 — no option structure exists that cheap), so the budget
+    # gets a FLOOR (default $60, about one narrow vertical on a cheap stock),
+    # hard-capped at a fraction of equity (default 30%) so one defined-risk
+    # trade can never risk more than a third of the book. On a $250 account:
+    # max(7.5, 60) = 60, capped at 75 -> $60. That IS the aggressive end — it's
+    # how a small account grows — and the loss is still fully prepaid/known.
+    pct = float(os.environ.get("QTSYS_AT_OPT_RISK_PCT", "0.03"))
+    floor = float(os.environ.get("QTSYS_AT_OPT_MIN_RISK", "60"))
+    cap_frac = float(os.environ.get("QTSYS_AT_OPT_MAX_FRAC", "0.30"))
+    budget = min(max(equity * pct, floor), equity * cap_frac)
     for i in ideas:
         i["notional"] = round(budget, 2)         # provisional, for the Risk review
         i["verified"] = True                     # defined-risk skill, machine-tradable
@@ -1607,14 +1626,21 @@ def _size_option_structures(plan: dict) -> int:
                 ch.get("chain") or [], ch.get("spot") or 0, preset,
                 risk_amt=idea.get("risk_amt") or 0,
                 expiration=ch.get("expiration", ""), view=idea.get("side", ""))
+            if not sp and preset == "straddle":
+                # small-account fallback: OTM strangle buys the same vol view
+                # for roughly half the ATM premium
+                sp = optexec.pick_structure(
+                    ch.get("chain") or [], ch.get("spot") or 0, "strangle",
+                    risk_amt=idea.get("risk_amt") or 0,
+                    expiration=ch.get("expiration", ""), view=idea.get("side", ""))
         except Exception:
             sp = None
         if not sp:
             skipped.append({"symbol": idea["symbol"], "structure": preset,
                             "budget": idea.get("risk_amt"),
-                            "reason": "risk budget below one contract's max loss "
-                            "(raise QTSYS_AT_OPT_RISK_PCT or wait for more equity) "
-                            "or chain too thin"})
+                            "reason": "even the narrowest structure exceeds the "
+                            "risk budget (QTSYS_AT_OPT_MIN_RISK floors it) or "
+                            "the chain is too thin"})
         if sp:
             idea["preset"] = sp["preset"]
             idea["contracts"] = sp["contracts"]

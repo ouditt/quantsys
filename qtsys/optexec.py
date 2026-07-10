@@ -69,6 +69,11 @@ AUTO_STRUCTURES = {"long_call", "long_put", "bull_call", "bear_put",
                    "bull_put", "bear_call", "iron_condor", "straddle", "strangle"}
 
 
+# width-parametric structures, ordered from the default desk shape down to the
+# narrowest the chain offers — the small-account fitting ladder
+_WIDTH_FIT = {"bull_call", "bear_put", "bull_put", "bear_call", "iron_condor"}
+
+
 def pick_structure(chain: list[dict], spot: float, preset: str, risk_amt: float,
                    expiration: str = "", max_contracts: int = MAX_CONTRACTS,
                    view: str = "") -> dict | None:
@@ -77,9 +82,22 @@ def pick_structure(chain: list[dict], spot: float, preset: str, risk_amt: float,
     can trade straddles/strangles (buy vol), iron condors and credit verticals
     (sell vol). Sizing is off the KNOWN max loss per contract; exits are the
     same P&L-vs-entry rule the monitor already applies, expressed in the signed
-    per-contract value space so debit and credit share one code path."""
+    per-contract value space so debit and credit share one code path.
+
+    SMALL-ACCOUNT FITTING: if the default-width structure's max loss exceeds
+    the budget, verticals/condors are rebuilt progressively NARROWER (down to
+    one strike step — e.g. a $1-wide vertical risks <= ~$100/contract), so a
+    small account can express the same view with the same defined risk."""
     from .optstrat import build
-    st = build(chain, spot, preset)
+    st = None
+    for width in ((None, 1) if preset in _WIDTH_FIT else (None,)):
+        cand = build(chain, spot, preset, width=width)
+        if not cand:
+            continue
+        if abs(cand["max_loss"]) <= risk_amt or width == 1:
+            st = cand
+            break
+        st = st or cand                          # remember the default shape
     if not st:
         return None
     entry = st["net_cost"]                       # signed $/contract: +debit / -credit
@@ -216,6 +234,23 @@ def _selftest():
     assert AUTO_STRUCTURES == {"long_call", "long_put", "bull_call", "bear_put",
                                "bull_put", "bear_call", "iron_condor",
                                "straddle", "strangle"}
+
+    # ---- small-account width fitting ----
+    from .optstrat import build as _build
+    w2 = _build(chain, 100.0, "bull_call")          # default: ~$10-wide, big risk
+    w2_loss = abs(w2["max_loss"])
+    w1_loss = abs(_build(chain, 100.0, "bull_call", width=1)["max_loss"])
+    assert w1_loss < w2_loss
+    # a budget that affords ONLY the narrow shape -> fitted, 1 contract
+    small = pick_structure(chain, 100.0, "bull_call",
+                           risk_amt=w1_loss + 1, expiration=exp)
+    assert small and small["contracts"] == 1, small
+    assert abs(small["total_max_loss"]) <= w1_loss + 1, "fitted within the small budget"
+    width_small = small["legs"][1]["strike"] - small["legs"][0]["strike"]
+    assert width_small == 5.0, "narrowed to one strike step"
+    # a budget below even the narrowest shape -> refused
+    assert pick_structure(chain, 100.0, "bull_call", risk_amt=w1_loss * 0.5,
+                          expiration=exp) is None
     print(f"optexec self-test ✓  bull-call sized {sp['contracts']}x within "
           f"risk (maxL {sp['total_max_loss']}), bear-put, budget floor, "
           f"target/stop/time exits; pick_structure straddle/condor/credit "
