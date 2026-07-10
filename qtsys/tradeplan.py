@@ -129,6 +129,13 @@ def draft(data: dict) -> dict:
     equity = data.get("equity") or 0.0
     posture = data.get("posture", "BALANCED")
     risk_pct = RISK_PCT.get(posture, 0.015)
+    # SMALL-ACCOUNT GROWTH MODE: a percent of tiny equity is dust ($250 x 1.5%
+    # = $3.75 risk -> unmovable positions). The server passes a $ risk floor
+    # for small books; it lifts risk_pct so each trade risks at least that,
+    # hard-capped at 8% so "growth mode" never becomes "blow-up mode".
+    floor_amt = float(data.get("risk_floor_amt") or 0)
+    if floor_amt and equity:
+        risk_pct = min(max(risk_pct, floor_amt / equity), 0.08)
     maxN = data.get("max_order_notional", 25_000.0)
     sym_cap = data.get("max_symbol_notional")        # auto-trader per-symbol cap
     quote, atr = data.get("quote", lambda s: None), data.get("atr", lambda s: None)
@@ -148,6 +155,9 @@ def draft(data: dict) -> dict:
             verified=False, rank=99):
         if sym in seen:
             return
+        if side == "SHORT" and "/" in sym:
+            return          # the venue cannot short crypto — don't plan what
+                            # can only die as an order rejection
         px = quote(sym)
         if not px:
             return
@@ -435,9 +445,32 @@ def _selftest():
     assert not [i for i in p5["ideas"] if i["symbol"] == "AAPL"], "won't auto-flip"
     assert any(h["symbol"] == "AAPL" and h["action"] == "flip" for h in p5["holds"])
 
+    # ---- small-account growth mode + crypto rules ----
+    # crypto SHORT is never planned (the venue can't short crypto)
+    cdata = dict(data, setups=data["setups"] + [
+        {"asset": "BTC/USD", "side": "SHORT", "strategy": "meanrev_rsi2",
+         "family": "MeanRev", "hist_exp": 0.01}])
+    pc = draft(cdata)
+    assert not [i for i in pc["ideas"] if i["symbol"] == "BTC/USD"], "no crypto shorts"
+    # long crypto on a tiny book: risk floor lifts sizing off the dust level
+    tiny = dict(data, equity=250.0, risk_floor_amt=10.0, max_symbol_notional=75.0,
+                setups=[{"asset": "BTC/USD", "side": "LONG",
+                         "strategy": "roll_high_252", "family": "Momentum",
+                         "hist_exp": 0.03}], arb_survivors=[], fundamental_picks=[])
+    pt = draft(tiny)
+    btc = next(i for i in pt["ideas"] if i["symbol"] == "BTC/USD")
+    assert pt["risk_pct"] == 0.04, pt["risk_pct"]          # $10/$250 floor
+    assert 0 < btc["qty"] < 1, "fractional crypto qty"
+    assert btc["notional"] <= 75.0 + 1, "clipped to the small-account symbol cap"
+    assert btc["risk_amt"] >= 1.0, btc["risk_amt"]
+    # the floor never exceeds the 8% blow-up guard
+    pt2 = draft(dict(tiny, equity=100.0))                  # $10/$100 = 10% -> 8%
+    assert pt2["risk_pct"] == 0.08, pt2["risk_pct"]
+
     print(f"tradeplan self-test ✓  drafted {len(plan['ideas'])} ideas w/ ATR "
           f"stops+2R targets, 4-agent deliberation, half-size on unverified, "
-          f"persisted; portfolio-aware hold/increase/flip idempotency")
+          f"persisted; portfolio-aware hold/increase/flip idempotency; "
+          f"small-account risk floor + no-crypto-short rule")
 
 
 if __name__ == "__main__":

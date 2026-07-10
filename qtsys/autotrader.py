@@ -80,6 +80,10 @@ class AutoTrader:
         self.max_daily_loss = float(os.environ.get("QTSYS_AT_MAX_DAILY_LOSS", "0.04"))
         # per-symbol exposure cap, as a fraction of equity (default 10%)
         self.max_symbol_pct = float(os.environ.get("QTSYS_AT_MAX_SYMBOL_PCT", "0.10"))
+        # small-account growth mode: below this equity the per-symbol cap rises
+        # to the small-cap fraction (10% of $250 is dust; 30% is a position)
+        self.small_acct = float(os.environ.get("QTSYS_SMALL_ACCT", "3000"))
+        self.small_symbol_pct = float(os.environ.get("QTSYS_SMALL_SYMBOL_PCT", "0.30"))
         # live unlock: distinct PAPER trading days required before the engine
         # will honor QTSYS_AUTOTRADE_LIVE (0 disables the requirement)
         self.paper_days_req = int(os.environ.get("QTSYS_AT_PAPER_DAYS", "60"))
@@ -120,6 +124,15 @@ class AutoTrader:
             self.log("AutoTrader", f"DSR threshold set to {t:g} "
                      + ("(below the 0.95 'likely real' bar — expect more "
                         "noise trades)" if t < 0.95 else ""), "warn")
+
+    def effective_symbol_pct(self, equity: float) -> float:
+        """Per-symbol cap fraction, small-account aware: a $250 book capped at
+        10%/symbol can only hold $25 positions — dust. Below the small-account
+        threshold the cap rises (default 30%) so a position is worth having;
+        the max loss any single trade can realise remains bounded by it."""
+        if equity and equity < self.small_acct:
+            return max(self.max_symbol_pct, self.small_symbol_pct)
+        return self.max_symbol_pct
 
     # ---------------------------------------------------------------- kv/state
     def _get(self, k, d=None):
@@ -268,7 +281,7 @@ class AutoTrader:
             equity = float(self.broker.get_account().get("equity") or 0)
         except Exception:
             equity = 0.0
-        sym_cap = equity * self.max_symbol_pct if equity else None
+        sym_cap = equity * self.effective_symbol_pct(equity) if equity else None
         exposure = {}                               # managed notional per symbol
         for p in self.open_positions():
             exposure[p["symbol"]] = (exposure.get(p["symbol"], 0.0)
@@ -672,6 +685,10 @@ def _selftest():
          "options_alt": sp}]})
     assert r2["executed"] == 1
     assert [p for p in at.open_positions() if p["symbol"] == "MSFT3"][0]["kind"] == "equity"
+
+    # small-account growth mode: per-symbol cap widens below the threshold
+    assert at.effective_symbol_pct(250.0) == 0.30, "small book -> 30% cap"
+    assert at.effective_symbol_pct(50_000.0) == at.max_symbol_pct, "normal book unchanged"
 
     # STANDALONE volatility structure (credit iron condor) — the vol skill's
     # output: its own defined-risk trade, entered via the generalised path.

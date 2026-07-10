@@ -1497,11 +1497,19 @@ def _assemble_plan_data() -> dict:
                               "entry": entry}
     except Exception:
         pass
+    eq = float(acct.get("equity") or 0)
+    # small-account growth mode: floor the per-trade risk in $ so tiny books
+    # size positions that can actually move the needle (mirrors the options
+    # budget floor); the planner caps the implied risk% at 8%.
+    risk_floor = (float(os.environ.get("QTSYS_SMALL_MIN_RISK", "10"))
+                  if eq and eq < float(os.environ.get("QTSYS_SMALL_ACCT", "3000"))
+                  else 0.0)
     return {
-        "equity": float(acct.get("equity") or 0), "posture": state.get("posture", "BALANCED"),
+        "equity": eq, "posture": state.get("posture", "BALANCED"),
         "holdings": holdings,
-        "max_symbol_notional": (float(acct.get("equity") or 0)
-                                * (at.max_symbol_pct if at else 0.10)) or None,
+        "risk_floor_amt": risk_floor,
+        "max_symbol_notional": (eq * (at.effective_symbol_pct(eq) if at else 0.10))
+                               or None,
         "max_order_notional": state["gw"].limits.max_order_notional,
         "max_gross_leverage": state["gw"].limits.max_gross_leverage,
         "quote": _plan_quote, "atr": _atr, "setups": setups,
