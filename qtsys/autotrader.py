@@ -273,8 +273,31 @@ class AutoTrader:
         for p in self.open_positions():
             exposure[p["symbol"]] = (exposure.get(p["symbol"], 0.0)
                                      + abs(p["qty"] * p["entry"]))
+        managed_ospreads = {p["symbol"] for p in self.open_positions()
+                            if p.get("kind") == "ospread"}
         for idea in plan.get("ideas", []):
             sym = idea["symbol"]
+            # STANDALONE volatility / option-structure idea (a straddle, condor,
+            # or credit vertical — its own defined-risk trade, committee-approved
+            # and pre-sized). Not an equity holding, so it bypasses the equity
+            # DSR gate; still gated by options_on, the order cap, and one
+            # structure per underlying.
+            if idea.get("kind") == "option_structure":
+                if not self.options_on:
+                    skipped.append((sym, "options auto-trading OFF")); continue
+                if not idea.get("structure"):
+                    skipped.append((sym, "option structure unsized (no live chain)")); continue
+                if sym in managed_ospreads:
+                    skipped.append((sym, f"already running an option structure on {sym}")); continue
+                if self._orders_today() >= self.max_orders_day:
+                    skipped.append((sym, "daily order cap")); continue
+                ok, why = self._enter_spread(idea, plan.get("date", self._today()))
+                if ok:
+                    done += 1
+                    managed_ospreads.add(sym)
+                else:
+                    skipped.append((sym, why))
+                continue
             # a deliberate, planner-authorised INCREASE is the ONLY sanctioned
             # way to add to a held name — it carries an explicit delta qty and
             # the "fresh top-priority signal" label; everything else is a
@@ -357,15 +380,23 @@ class AutoTrader:
         return self._get("plan_exec:" + plan_date) == "1"
 
     def _enter_spread(self, idea: dict, plan_date: str) -> tuple[bool, str]:
-        """Enter a defined-risk vertical (from optexec.pick_spread). Max loss
-        is the prepaid debit — sized inside the idea's risk budget already."""
+        """Enter a DEFINED-RISK options structure. Handles both the vertical
+        ALTERNATIVE attached to a directional idea (idea["options_alt"], from
+        optexec.pick_spread) and a STANDALONE volatility/structure idea
+        (idea["structure"], from optexec.pick_structure) — debit or credit,
+        2- or 4-legged. Max loss is known at entry and, for debits, prepaid."""
         import json
-        sp = idea["options_alt"]
+        sp = idea.get("structure") or idea.get("options_alt")
+        if not isinstance(sp, dict):
+            return False, "no sized option structure"
         if not hasattr(self.broker, "option_spread_order"):
             return False, "venue has no multi-leg options support"
-        # marketable limit: debit per share + 2% buffer, so all legs fill
-        # together or the order rests — never legged in
-        lim = round(sp["debit_per"] / 100.0 * 1.02, 2)
+        # marketable net limit in per-share terms (Alpaca convention): concede
+        # 2% to guarantee an all-or-nothing fill. debit_per is the SIGNED entry
+        # value/contract (+debit pay / -credit receive), so a debit pays up and
+        # a credit accepts slightly less — the sign is handled uniformly.
+        entry = sp["debit_per"]
+        lim = round(entry / 100.0 * (1.02 if entry > 0 else 0.98), 2)
         res = self.broker.option_spread_order(sp["legs"], sp["contracts"], lim)
         self._bump_orders()
         if res.get("status") == "rejected":
@@ -380,12 +411,14 @@ class AutoTrader:
              "paper" if getattr(self.broker, "paper", True) else "live",
              json.dumps(sp["legs"]), sp.get("expiration", "")))
         self.db.execute("UPDATE managed SET strategy=? WHERE rowid=last_insert_rowid()",
-                        (str(idea.get("strategy") or "auto") + "+spread",))
+                        (str(idea.get("strategy") or "auto")
+                         + ("" if idea.get("kind") == "option_structure" else "+spread"),))
         self.db.commit()
+        flow = sp.get("flow", "debit")
         self.log("AutoTrader",
                  f"ENTERED {sp['preset']} {sp['contracts']}x {idea['symbol']} "
-                 f"debit ${sp['debit_per']}/contract (max loss "
-                 f"${abs(sp['total_max_loss']):,.0f} prepaid, target "
+                 f"{flow} ${abs(sp['debit_per']):g}/contract (max loss "
+                 f"${abs(sp['total_max_loss']):,.0f} defined, target value "
                  f"${sp['exit']['target_value']})", "warn")
         return True, ""
 
@@ -639,10 +672,43 @@ def _selftest():
          "options_alt": sp}]})
     assert r2["executed"] == 1
     assert [p for p in at.open_positions() if p["symbol"] == "MSFT3"][0]["kind"] == "equity"
+
+    # STANDALONE volatility structure (credit iron condor) — the vol skill's
+    # output: its own defined-risk trade, entered via the generalised path.
+    at.options_on = True
+    condor = {"kind": "ospread", "preset": "iron_condor", "structure": "iron_condor",
+              "side": "NEUTRAL", "expiration": exp, "contracts": 3, "flow": "credit",
+              "legs": [{"symbol": "P90", "qty": -1, "right": "put", "strike": 90.0, "mid": 1.2},
+                       {"symbol": "P85", "qty": 1, "right": "put", "strike": 85.0, "mid": 0.6},
+                       {"symbol": "C110", "qty": -1, "right": "call", "strike": 110.0, "mid": 1.1},
+                       {"symbol": "C115", "qty": 1, "right": "call", "strike": 115.0, "mid": 0.5}],
+              "debit_per": -120.0, "max_loss_per": -380.0, "max_profit_per": 120.0,
+              "total_debit": -360.0, "total_max_loss": -1140.0,
+              "exit": {"target_value": -48.0, "stop_value": -310.0, "time_exit_days": 1}}
+    vplan = {"date": at._today(), "ideas": [
+        {"symbol": "SPYV", "kind": "option_structure", "side": "NEUTRAL",
+         "verified": True, "structure": condor, "strategy": "vol_iron_condor"}]}
+    rv = at.execute_plan(vplan)
+    assert rv["executed"] == 1, rv
+    cpos = [p for p in at.open_positions() if p["symbol"] == "SPYV"]
+    assert cpos and cpos[0]["kind"] == "ospread", "condor managed as a structure"
+    assert abs(cpos[0]["entry"] - (-120.0)) < 1e-9, "credit entry value stored signed"
+    # a second run must NOT stack another structure on the same underlying
+    assert at.execute_plan(vplan)["executed"] == 0, "one structure per underlying"
+    # credit decays toward 0 -> profit vs the -120 entry -> target hit, close
+    at.broker.px.update({"P90": 0.4, "P85": 0.2, "C110": 0.35, "C115": 0.15})
+    at.monitor()
+    assert not [p for p in at.open_positions() if p["symbol"] == "SPYV"], \
+        "credit condor closed at profit target"
+    crow = at.db.execute("SELECT exit_reason FROM managed WHERE symbol='SPYV' "
+                         "AND status='closed'").fetchone()
+    assert crow and crow[0] == "target", crow
+
     print("autotrader self-test ✓  disarmed default, enter->TP profit->SL loss, "
           "gateway routed, per-symbol cap, DSR gate, live-without-flag refused, "
           "60-paper-day lock, spread enter->target close (+920 realized), "
-          "options-off falls back to shares")
+          "options-off falls back to shares, standalone credit-condor "
+          "enter/dedup/profit-close")
 
 
 if __name__ == "__main__":

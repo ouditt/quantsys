@@ -229,6 +229,8 @@ def _risk_review(plan, data):
 def _validation_review(plan, data):
     rejects, notes = set(), []
     for i, idea in enumerate(plan["ideas"]):
+        if idea.get("kind") == "option_structure":
+            continue                              # defined-risk structure, not half-sized
         if not idea.get("verified"):
             notes.append(f"{idea['symbol']}/{idea['strategy']}: not DSR-verified "
                          "— HALF size, and the auto-trader will NOT touch it "
@@ -248,6 +250,10 @@ def _fundamental_review(plan, data):
         return {"agent": "Fundamental Analyst", "notes": ["no fundamental feed"],
                 "rejects": set()}
     for idea in plan["ideas"]:
+        if idea.get("kind") == "option_structure":
+            # a straddle WANTS a catalyst and a condor already priced the regime
+            # — the vol skill owns that call, not the equity earnings screen
+            continue
         try:
             m = (fund(idea["symbol"]) or {}).get("metrics", {}) or {}
         except Exception:
@@ -269,6 +275,8 @@ def _microstructure_review(plan, data):
     ob = data.get("orderbook")
     notes = []
     for idea in plan["ideas"]:
+        if idea.get("kind") == "option_structure":
+            continue                              # options vetted via chain gate_ok/OI
         if "/" in idea["symbol"] and ob:              # crypto: real L2 liquidity
             try:
                 from .orderbook import metrics

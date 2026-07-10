@@ -141,8 +141,15 @@ def _day_baseline(broker) -> float:
     today = str(_dt.date.today())
     if persisted.get("date") == today and persisted.get("equity"):
         return float(persisted["equity"])      # restart within the same day
-    eq = _equity(broker)
-    _save_day_base(today, eq)
+    try:
+        eq = _equity(broker)
+    except Exception:
+        # a transient venue hiccup (e.g. rate-limit 401) must NOT crash boot:
+        # fall back to the last known baseline; the tick loop re-anchors once
+        # the broker recovers. 0 -> _day_change returns None -> no false halt.
+        return float(persisted.get("equity") or 0.0)
+    if eq:
+        _save_day_base(today, eq)
     return eq
 
 
@@ -1507,6 +1514,123 @@ def _assemble_plan_data() -> dict:
     }
 
 
+def _vol_underlyings(plan: dict, cap: int = 6) -> list[str]:
+    """Liquid optionable names for the vol scan: the plan's equity ideas first,
+    then a configurable watchlist of deep-chain names. Crypto/options symbols
+    are excluded (no equity option chain)."""
+    import re
+    _opt = re.compile(r"^[A-Z]{1,6}\d{6}[CP]\d{8}$")
+    watch = [s.strip().upper() for s in os.environ.get(
+        "QTSYS_VOL_WATCH", "SPY,QQQ,AAPL,NVDA,MSFT,TSLA,AMD,META").split(",") if s.strip()]
+    # LIQUID names first: microcaps carry stale/garbage option quotes that
+    # produce nonsense IV and mispriced structures. Plan equity ideas are only
+    # added after the deep-chain watchlist.
+    out, seen = [], set()
+    for s in watch + [i["symbol"] for i in plan.get("ideas", [])]:
+        if (s and s not in seen and "/" not in s and not _opt.match(s)
+                and s.replace(".", "").isalpha()):
+            seen.add(s)
+            out.append(s)
+    return out[:cap]
+
+
+def _option_structure_ideas(data: dict, plan: dict) -> list[dict]:
+    """Generate volatility option ideas (optvol) for the committee. Each carries
+    a provisional notional (its max-loss budget) so the Risk Officer counts it;
+    the concrete legs/contracts are sized AFTER deliberation from the live
+    chain. Only runs when options auto-trading machinery is present."""
+    broker = state["broker"]
+    if not hasattr(broker, "option_chain"):
+        return []
+    from . import optvol
+    unders = _vol_underlyings(plan)
+    if not unders:
+        return []
+    # directional views from the drafted equity ideas -> credit vs debit choice
+    directional = {}
+    for i in plan.get("ideas", []):
+        if i.get("asset_class") == "Equity" and i.get("side") in ("LONG", "SHORT"):
+            directional[i["symbol"]] = "bullish" if i["side"] == "LONG" else "bearish"
+
+    def chain_of(sym):
+        ch = _build_chain(broker, sym, "")
+        # pick a >=5-DTE expiry so theta/pin risk isn't immediate
+        from . import optexec
+        exps = ch.get("expirations") or []
+        exp = next((e for e in exps if (optexec.days_to_expiry(e) or 0) >= 5), "")
+        if exp and exp != ch.get("expiration"):
+            ch = _build_chain(broker, sym, exp)
+        return ch
+
+    def bars_of(sym):
+        h = state["hist"].get(sym)
+        if h:
+            return [b["c"] for b in h]
+        try:                                     # watchlist names aren't cached
+            return [b["c"] for b in broker.history(sym, n=40)] or None
+        except Exception:
+            return None
+
+    ideas = optvol.ideas(unders, chain_of, bars_of, directional=directional,
+                         max_ideas=int(os.environ.get("QTSYS_VOL_MAX", "3")))
+    # per-structure risk budget = max loss we'll allocate to one options trade.
+    # Defined-risk index structures cost ~$300-2000/contract, so on a small
+    # account 1% of equity can't afford one — the sizer will (correctly) decline
+    # and the skip is surfaced in plan["opt_skipped"]. Operator-tunable.
+    budget = float(data.get("equity") or 0) * float(
+        os.environ.get("QTSYS_AT_OPT_RISK_PCT", "0.03"))
+    for i in ideas:
+        i["notional"] = round(budget, 2)         # provisional, for the Risk review
+        i["verified"] = True                     # defined-risk skill, machine-tradable
+        i["dsr"] = None
+        i["risk_amt"] = round(budget, 2)
+    return ideas
+
+
+def _size_option_structures(plan: dict) -> int:
+    """After the committee, turn each surviving option-structure idea into a
+    concrete, sized structure from the live chain (optexec.pick_structure).
+    Unsizable ideas are dropped from the plan so nothing dangles."""
+    broker = state["broker"]
+    if not hasattr(broker, "option_chain"):
+        return 0
+    from . import optexec
+    n, kept, skipped = 0, [], []
+    for idea in plan.get("ideas", []):
+        if idea.get("kind") != "option_structure":
+            kept.append(idea)
+            continue
+        preset = idea.get("structure")
+        try:
+            ch = _build_chain(broker, idea["symbol"], idea.get("expiration", ""))
+            sp = optexec.pick_structure(
+                ch.get("chain") or [], ch.get("spot") or 0, preset,
+                risk_amt=idea.get("risk_amt") or 0,
+                expiration=ch.get("expiration", ""), view=idea.get("side", ""))
+        except Exception:
+            sp = None
+        if not sp:
+            skipped.append({"symbol": idea["symbol"], "structure": preset,
+                            "budget": idea.get("risk_amt"),
+                            "reason": "risk budget below one contract's max loss "
+                            "(raise QTSYS_AT_OPT_RISK_PCT or wait for more equity) "
+                            "or chain too thin"})
+        if sp:
+            idea["preset"] = sp["preset"]
+            idea["contracts"] = sp["contracts"]
+            idea["max_loss"] = sp["total_max_loss"]
+            idea["notional"] = abs(sp["total_max_loss"])
+            # the executor's _enter_spread reads idea["structure"] as the SIZED
+            # dict — overwrite the preset-name string with the concrete structure
+            idea["structure"] = sp
+            kept.append(idea)
+            n += 1
+        # else: couldn't size (thin chain / budget) — drop it, don't leave a stub
+    plan["ideas"] = kept
+    plan["opt_skipped"] = skipped
+    return n
+
+
 def _attach_options_alts(plan: dict, max_ideas: int = 3) -> int:
     """Give the top DSR-verified equity ideas a defined-risk vertical
     alternative from the live chain (used by the auto-trader only when
@@ -1543,8 +1667,19 @@ def _build_and_adopt_plan(execute: bool = False) -> dict:
     from . import tradeplan
     data = _assemble_plan_data()
     plan = tradeplan.draft(data)
+    # VOLATILITY SKILL: standalone option-structure ideas (straddle/condor/credit
+    # verticals from IV-vs-realized) join the plan BEFORE deliberation, so they
+    # face the SAME committee as equities and crypto.
+    try:
+        plan["ideas"] += _option_structure_ideas(data, plan)
+    except Exception:
+        pass
     plan = tradeplan.deliberate(plan, data,
                                 getattr(state["daemon"], "llm_fn", None))
+    try:
+        plan["opt_structures"] = _size_option_structures(plan)   # size survivors off the live chain
+    except Exception:
+        plan["opt_structures"] = 0
     try:
         plan["options_alts"] = _attach_options_alts(plan)
     except Exception:

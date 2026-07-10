@@ -62,6 +62,65 @@ def pick_spread(chain: list[dict], spot: float, side: str, risk_amt: float,
     }
 
 
+# structures the auto-trader may enter unattended: all DEFINED-RISK (worst case
+# known and, for debits, prepaid). Cash-secured puts / covered calls need share
+# collateral or assignment handling, so they are library-only (human/INBOX).
+AUTO_STRUCTURES = {"long_call", "long_put", "bull_call", "bear_put",
+                   "bull_put", "bear_call", "iron_condor", "straddle", "strangle"}
+
+
+def pick_structure(chain: list[dict], spot: float, preset: str, risk_amt: float,
+                   expiration: str = "", max_contracts: int = MAX_CONTRACTS,
+                   view: str = "") -> dict | None:
+    """Build + size ANY defined-risk structure (debit or credit) for a given
+    risk budget. Generalises pick_spread beyond debit verticals so the vol skill
+    can trade straddles/strangles (buy vol), iron condors and credit verticals
+    (sell vol). Sizing is off the KNOWN max loss per contract; exits are the
+    same P&L-vs-entry rule the monitor already applies, expressed in the signed
+    per-contract value space so debit and credit share one code path."""
+    from .optstrat import build
+    st = build(chain, spot, preset)
+    if not st:
+        return None
+    entry = st["net_cost"]                       # signed $/contract: +debit / -credit
+    max_loss_per = abs(st["max_loss"])           # known worst case $/contract
+    max_profit_per = st["max_profit"]
+    if max_loss_per <= 0 or max_profit_per <= 0:
+        return None
+    # sign sanity: a debit structure must actually cost money and a credit one
+    # must actually pay it. A mismatch means stale/garbage quotes (common on
+    # illiquid chains) — refuse it rather than trade a nonsense structure.
+    _DEBIT = {"long_call", "long_put", "bull_call", "bear_put", "straddle", "strangle"}
+    _CREDIT = {"bull_put", "bear_call", "iron_condor"}
+    if (preset in _DEBIT and entry <= 0) or (preset in _CREDIT and entry >= 0):
+        return None
+    if risk_amt < max_loss_per:                  # can't afford one contract's risk
+        return None
+    contracts = min(int(risk_amt // max_loss_per), max_contracts)
+    if contracts < 1:
+        return None
+    return {
+        "kind": "ospread", "preset": preset, "structure": preset,
+        "side": view or ("LONG" if entry > 0 else "NEUTRAL"),
+        "expiration": expiration, "contracts": contracts,
+        "legs": [{"symbol": l["symbol"], "qty": l["qty"], "right": l["right"],
+                  "strike": l["strike"], "mid": l["mid"]} for l in st["legs"]],
+        "debit_per": round(entry, 2),                    # signed entry value $/contract
+        "flow": "debit" if entry > 0 else "credit",
+        "max_loss_per": round(-max_loss_per, 2),
+        "max_profit_per": round(max_profit_per, 2),
+        "breakevens": st["breakevens"], "greeks": st.get("greeks", {}),
+        "total_debit": round(entry * contracts, 2),
+        "total_max_loss": round(-max_loss_per * contracts, 2),
+        "total_max_profit": round(max_profit_per * contracts, 2),
+        # exits in the SAME signed value space spread_value() returns: take
+        # PROFIT_TARGET of the max gain, stop after STOP_FRAC of the max loss.
+        "exit": {"target_value": round(entry + PROFIT_TARGET * max_profit_per, 2),
+                 "stop_value": round(entry + STOP_FRAC * st["max_loss"], 2),
+                 "time_exit_days": TIME_EXIT_DAYS},
+    }
+
+
 def spread_value(legs: list[dict], quote_fn) -> float | None:
     """Current $ value of the spread per contract: sum of signed leg quotes
     x multiplier. None if any leg can't be priced."""
@@ -135,9 +194,32 @@ def _selftest():
     near = dict(sp, expiration=str(datetime.date.today()))
     assert exit_check(v0, near) == "expiry", "T-0 -> time exit"
     assert spread_value(sp["legs"], lambda s: None) is None, "unquotable -> None"
+
+    # ---- pick_structure: credit + long-vol, defined risk, unified exits ----
+    straddle = pick_structure(chain, 100.0, "straddle", risk_amt=2000.0, expiration=exp)
+    assert straddle and straddle["preset"] == "straddle" and straddle["flow"] == "debit"
+    assert straddle["total_max_loss"] >= -2000.0, "vol buy sized within budget"
+    assert len(straddle["legs"]) == 2 and straddle["side"] == "LONG"
+    condor = pick_structure(chain, 100.0, "iron_condor", risk_amt=2000.0,
+                            expiration=exp, view="NEUTRAL")
+    assert condor and len(condor["legs"]) == 4 and condor["flow"] == "credit"
+    assert condor["debit_per"] < 0, "credit structure: negative entry value"
+    assert condor["total_max_loss"] < 0 and condor["total_max_profit"] > 0
+    # exits straddle the entry value on both sides (take profit above, stop below)
+    assert condor["exit"]["stop_value"] < condor["debit_per"] < condor["exit"]["target_value"]
+    bp = pick_structure(chain, 100.0, "bull_put", risk_amt=2000.0, expiration=exp)
+    assert bp and bp["flow"] == "credit" and bp["contracts"] >= 1
+    # the monitor's realized math works on the signed entry for a credit too:
+    # value decaying toward 0 is a PROFIT vs the negative entry
+    entry_val = spread_value(condor["legs"], {l["symbol"]: l["mid"] for l in condor["legs"]}.get)
+    assert abs(entry_val - condor["debit_per"]) < 1e-6, "entry value = net credit"
+    assert AUTO_STRUCTURES == {"long_call", "long_put", "bull_call", "bear_put",
+                               "bull_put", "bear_call", "iron_condor",
+                               "straddle", "strangle"}
     print(f"optexec self-test ✓  bull-call sized {sp['contracts']}x within "
           f"risk (maxL {sp['total_max_loss']}), bear-put, budget floor, "
-          f"target/stop/time exits")
+          f"target/stop/time exits; pick_structure straddle/condor/credit "
+          f"defined-risk + unified signed exits")
 
 
 if __name__ == "__main__":
