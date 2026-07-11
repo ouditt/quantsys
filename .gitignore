@@ -23,3 +23,6 @@ qtsys-state-*.tar.gz
 
 # per-day loss-breaker baseline (runtime state, self-anchored each day)
 qtsys/day_baseline.json
+
+# runtime log
+server.log
