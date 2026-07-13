@@ -118,9 +118,18 @@ def local_llm_fn():
     try:
         req = urllib.request.Request(f"{host}/api/tags")
         with urllib.request.urlopen(req, timeout=4) as r:
-            models = [m["name"] for m in json.loads(r.read()).get("models", [])]
+            catalog = json.loads(r.read()).get("models", [])
     except Exception:
         return None
+    # EMBEDDING models (family "bert", or an "embed" name) cannot do text
+    # generation — /api/generate 400s on them. Filter them out so the fallback
+    # never selects one (e.g. a box with only mxbai-embed-large + a chat model).
+    def _gen_ok(m):
+        fam = (m.get("details") or {}).get("family", "")
+        fams = (m.get("details") or {}).get("families") or []
+        name = m.get("name", "")
+        return "bert" not in ([fam] + list(fams)) and "embed" not in name.lower()
+    models = [m["name"] for m in catalog if _gen_ok(m)]
     if not models:
         return None
     # prefer the dedicated copilot model (small/fast), then the general model
