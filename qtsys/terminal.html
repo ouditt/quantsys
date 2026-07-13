@@ -1650,38 +1650,51 @@
     }
     async function liveRefresh(full) {
       try {
-        // allSettled: one failing endpoint (e.g. a position that can't be quoted)
-        // must never blank the rest of the terminal (agents, chart, book).
-        const [qs, acct, pos, ords, ag] = (await Promise.allSettled([
-          j("/api/quotes"), j("/api/account"), j("/api/positions"),
-          j("/api/orders"), j("/api/agents")])).map(r => r.status === "fulfilled" ? r.value : null);
-        if (qs) qs.forEach(q => { const o = S.quotes[q.symbol] || {}; o.last = q.last; o.prevClose = q.last - q.chg; o.spark = q.spark; S.quotes[q.symbol] = o });
-        if (acct) { Object.assign(S.account, acct); S.halted = !!acct.halted; }
-        if (pos) {
-          S.positions = pos.map(p => ({
-            symbol: p.symbol, qty: p.qty,
-            avg_cost: p.avg_price ?? p.avg_cost, last: p.last, mkt_value: p.mkt_value, unrealized: p.unrealized
-          }));
-          // seed held symbols not in the universe (options, other equities) so the
-          // portfolio/security views can render and quote them without crashing
-          pos.forEach(p => {
-            const isOpt = /^[A-Z]{1,6}\d{6}[CP]\d{8}$/.test(p.symbol);
-            if (!S.quotes[p.symbol]) S.quotes[p.symbol] = { last: p.last, prevClose: p.last, spark: [] };
-            else S.quotes[p.symbol].last = p.last;
-            if (!META[p.symbol]) META[p.symbol] = {
-              name: isOpt ? (p.symbol.slice(0, -15) + " option") : p.symbol,
-              cls: isOpt ? "Option" : "Equity", tradable: false
-            };
-          });
+        // WS pushes quotes+account when the socket is alive, so poll those ONLY
+        // as a fallback — no /api/quotes or /api/account traffic while WS is up.
+        if (!S._wsOk) {
+          const [qs, acct] = (await Promise.allSettled([j("/api/quotes"), j("/api/account")]))
+            .map(r => r.status === "fulfilled" ? r.value : null);
+          if (qs) qs.forEach(q => { const o = S.quotes[q.symbol] || {}; o.last = q.last; o.prevClose = q.last - q.chg; o.spark = q.spark; o.stale = q.stale; S.quotes[q.symbol] = o });
+          if (acct) { Object.assign(S.account, acct); S.halted = !!acct.halted; }
+          if (qs || acct) S._lastOk = Date.now();
         }
-        if (ords) S.orders = ords.map(o => ({
-          id: o.id, symbol: o.symbol, side: o.side, qty: o.qty,
-          type: o.type, limit_price: o.limit_price, status: o.status, ts: o.ts
-        }));
-        if (ag) { S.agents.master = ag.master; S.agents.list = ag.agents; }
-        const lg = await j("/api/agents/log?limit=80").catch(() => null);
-        if (lg) S.alog = lg.map(x => ({ ts: x.ts, agent: x.agent, level: x.level, message: x.message }));
-        const f = await j("/api/fills").catch(() => null); if (f) S.fills = f;
+        // 5s tier: positions + orders (the book changes on fills, not every tick)
+        if (!S._poTs || Date.now() - S._poTs > 5000) {
+          S._poTs = Date.now();
+          const [pos, ords] = (await Promise.allSettled([j("/api/positions"), j("/api/orders")]))
+            .map(r => r.status === "fulfilled" ? r.value : null);
+          if (pos) {
+            S.positions = pos.map(p => ({
+              symbol: p.symbol, qty: p.qty,
+              avg_cost: p.avg_price ?? p.avg_cost, last: p.last, mkt_value: p.mkt_value, unrealized: p.unrealized
+            }));
+            // seed held symbols not in the universe (options, other equities) so the
+            // portfolio/security views can render and quote them without crashing
+            pos.forEach(p => {
+              const isOpt = /^[A-Z]{1,6}\d{6}[CP]\d{8}$/.test(p.symbol);
+              if (!S.quotes[p.symbol]) S.quotes[p.symbol] = { last: p.last, prevClose: p.last, spark: [] };
+              else S.quotes[p.symbol].last = p.last;
+              if (!META[p.symbol]) META[p.symbol] = {
+                name: isOpt ? (p.symbol.slice(0, -15) + " option") : p.symbol,
+                cls: isOpt ? "Option" : "Equity", tradable: false
+              };
+            });
+          }
+          if (ords) S.orders = ords.map(o => ({
+            id: o.id, symbol: o.symbol, side: o.side, qty: o.qty,
+            type: o.type, limit_price: o.limit_price, status: o.status, ts: o.ts
+          }));
+        }
+        // 20s tier: agents + activity log + fills (slow-moving, off the hot path)
+        if (!S._alTs || Date.now() - S._alTs > 20000) {
+          S._alTs = Date.now();
+          const ag = await j("/api/agents").catch(() => null);
+          if (ag) { S.agents.master = ag.master; S.agents.list = ag.agents; }
+          const lg = await j("/api/agents/log?limit=80").catch(() => null);
+          if (lg) S.alog = lg.map(x => ({ ts: x.ts, agent: x.agent, level: x.level, message: x.message }));
+          const f = await j("/api/fills").catch(() => null); if (f) S.fills = f;
+        }
         if (!S._closedTs || Date.now() - S._closedTs > 12000) {
           S._closedTs = Date.now();
           j("/api/closed").then(c => { if (c) S.closed = c; if (S.page === "portfolio") render() }).catch(() => { });
@@ -1706,7 +1719,8 @@
             if (h && h.bars) S.bars[s] = h.bars
           }
         }
-        if (qs || acct) { S._lastOk = Date.now(); }       // at least the core feed answered
+        // S._lastOk is set by the quotes/account poll above (WS-down) or by the
+        // WS onmessage handler (WS-up); either way the feed badge stays honest.
         updateFeedBadge(); updateBreakerChip();
       } catch (e) { updateFeedBadge(); }
     }
@@ -1889,7 +1903,7 @@
         ws.onmessage = (ev) => {
           try {
             const d = JSON.parse(ev.data);
-            if (d.quotes) d.quotes.forEach(q => { const o = S.quotes[q.symbol] || {}; o.last = q.last; o.prevClose = q.last - q.chg; if (q.spark) o.spark = q.spark; S.quotes[q.symbol] = o; });
+            if (d.quotes) d.quotes.forEach(q => { const o = S.quotes[q.symbol] || {}; o.last = q.last; o.prevClose = q.last - q.chg; if (q.spark) o.spark = q.spark; o.stale = q.stale; S.quotes[q.symbol] = o; });
             if (d.account) { Object.assign(S.account, d.account); S.halted = !!d.account.halted; }
             if (d.halted !== undefined) S.halted = d.halted;
             S._lastOk = Date.now(); lightRepaint();
@@ -2164,7 +2178,7 @@
     }
 
     /* ============================================================ views */
-    const TABS = [["markets", "MKT"], ["launch", "LAUNCH"], ["plan", "PLAN"], ["portfolio", "PORT"], ["risk", "RISK"], ["calendar", "CAL"], ["screen", "SCREEN"], ["alerts", "ALERTS"], ["inbox", "INBOX"], ["agents", "AGENTS"], ["strats", "STRAT"], ["universe", "UNIVERSE"], ["data", "DATA"], ["audit", "AUDIT"], ["journal", "JOURNAL"]];
+    const TABS = [["markets", "MKT"], ["launch", "LAUNCH"], ["plan", "PLAN"], ["portfolio", "PORT"], ["risk", "RISK"], ["perf", "PERF"], ["calendar", "CAL"], ["screen", "SCREEN"], ["alerts", "ALERTS"], ["inbox", "INBOX"], ["agents", "AGENTS"], ["strats", "STRAT"], ["universe", "UNIVERSE"], ["data", "DATA"], ["audit", "AUDIT"], ["journal", "JOURNAL"]];
     function nav(page, sym) {
       S.page = page; S.sym = sym ?? S.sym;
       location.hash = page === "security" ? `/sec/${S.sym}` : `/${page}`;
@@ -2883,7 +2897,12 @@
         riskPanels = `<div class="panel"><div class="pb mut">Book is flat — VaR, factor exposures, and attribution populate when positions are open.</div></div>`;
       }
 
-      return `
+      const rgm = S.riskgov && S.riskgov.multiplier;   // adaptive governor chip
+      const govChip = rgm ? `<div class="panel"><div class="pb" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+    <span class="pill ${rgm.value > 1 ? "up" : rgm.value < 1 ? "rejected" : ""}">RISK ×${rgm.value.toFixed(2)}</span>
+    <span class="mut" style="flex:1;font-size:11px">${(rgm.reasons || []).map(esc).join(" · ")}</span>
+    <button class="btn" data-nav="perf">PERF →</button></div></div>` : "";
+      return govChip + `
   <div class="panel"><div class="ph">Risk engine · live limits</div><div class="pb grid3">
     <div class="stat"><div class="k">Gross leverage</div><div class="v num ${a.leverage > 1.5 ? "dn" : ""}">${fmt(a.leverage, 2)}×</div>
       <div class="bar" style="margin-top:6px"><i class="${a.leverage / LIMITS.max_gross_leverage > 0.8 ? "hot" : ""}" style="width:${Math.min(100, a.leverage / LIMITS.max_gross_leverage * 100) | 0}%"></i></div>
@@ -2917,6 +2936,125 @@
     <span class="mut" style="flex:1;font-size:11px">Cancels all working orders, flattens the book, blocks new orders. Fire-drilled — an untested kill switch is no kill switch.</span>
     ${S.halted ? `<button class="btn" id="resume">RESUME…</button>` : `<button class="btn danger" id="killbtn2">FIRE KILL SWITCH</button>`}
   </div></div>`;
+    }
+
+    /* ============================================================ PERF */
+    async function pollPerf(force) {
+      if (S.mode !== "live") return;
+      if (!force && S._perfTs && Date.now() - S._perfTs < 5000) return;   // debounce
+      S._perfTs = Date.now();
+      try {
+        const [ln, rg] = await Promise.all([
+          j("/api/learning").catch(() => null), j("/api/riskgov").catch(() => null)]);
+        if (ln) S.learning = ln;
+        if (rg) S.riskgov = rg;
+        if (S.page === "perf" && document.activeElement.tagName !== "INPUT") render();
+      } catch (e) { }
+    }
+    function drawEquityCurve(cv, pts) {
+      const dpr = devicePixelRatio || 1, w = cv.clientWidth || 600, h = cv.clientHeight || 200;
+      cv.width = w * dpr; cv.height = h * dpr; const x = cv.getContext("2d"); x.scale(dpr, dpr);
+      x.clearRect(0, 0, w, h);
+      if (!pts || pts.length < 2) {
+        x.fillStyle = "#77839a"; x.font = "11px monospace";
+        x.fillText("accumulating equity points… (recorded ~1/min by the governor)", 8, h / 2);
+        return;
+      }
+      const eq = pts.map(p => p.equity);
+      const mn = Math.min(...eq), mx = Math.max(...eq), sp = (mx - mn) || 1;
+      const X = i => i / (pts.length - 1) * (w - 4) + 2;
+      const Y = v => h - 4 - ((v - mn) / sp) * (h - 12);
+      let peak = -Infinity; const pk = eq.map(v => (peak = Math.max(peak, v)));
+      // drawdown band (between equity and its running peak)
+      x.beginPath(); x.moveTo(X(0), Y(pk[0]));
+      for (let i = 1; i < pts.length; i++) x.lineTo(X(i), Y(pk[i]));
+      for (let i = pts.length - 1; i >= 0; i--) x.lineTo(X(i), Y(eq[i]));
+      x.closePath(); x.fillStyle = "rgba(255,80,99,0.10)"; x.fill();
+      // running-peak line (amber, dashed)
+      x.beginPath(); pk.forEach((v, i) => i ? x.lineTo(X(i), Y(v)) : x.moveTo(X(i), Y(v)));
+      x.strokeStyle = "#ffb200"; x.lineWidth = 1; x.setLineDash([3, 3]); x.stroke(); x.setLineDash([]);
+      // equity line
+      x.beginPath(); eq.forEach((v, i) => i ? x.lineTo(X(i), Y(v)) : x.moveTo(X(i), Y(v)));
+      x.strokeStyle = eq.at(-1) >= eq[0] ? "#27d17f" : "#ff5063"; x.lineWidth = 1.6; x.stroke();
+    }
+    function vPerf() {
+      const rg = S.riskgov, ln = S.learning;
+      if (!rg && !ln) { pollPerf(true); return `<div class="panel"><div class="pb mut">Loading performance… learning scorecards and the risk governor populate on first fetch.</div></div>`; }
+      const pctf = (v, d = 2) => v == null ? "—" : (v * 100).toFixed(d) + "%";
+      const num = (v, d = 2) => v == null ? "—" : (+v).toFixed(d);
+      let html = "";
+      // 1) equity curve
+      const snap = (rg && rg.snapshot) || {};
+      html += `<div class="panel"><div class="ph">Equity curve · live book
+    <span class="right mut">peak ${snap.peak ? money(snap.peak, 0) : "—"} · dd ${pctf(snap.drawdown)}</span></div>
+    <div class="pb"><canvas id="eqcurve" style="width:100%;height:200px"></canvas>
+    <div class="note">Green = equity; amber dashed = running peak; red shading = drawdown from peak.</div></div></div>`;
+      // 2) risk governor
+      if (rg && rg.multiplier) {
+        const m = rg.multiplier, c = m.components || {}, en = rg.enforcement || {};
+        const bar = (lbl, v) => `<div style="display:flex;align-items:center;gap:10px;padding:3px 0">
+      <span style="width:74px" class="mut">${lbl}</span>
+      <div class="bar" style="flex:1"><i class="${v < 1 ? "hot" : ""}" style="width:${Math.min(100, (v || 0) / 1.5 * 100) | 0}%"></i></div>
+      <span class="num" style="width:48px;text-align:right">${num(v, 2)}×</span></div>`;
+        html += `<div class="panel"><div class="ph">Risk governor · adaptive size multiplier
+      <span class="right"><span class="pill ${m.value > 1 ? "up" : m.value < 1 ? "rejected" : ""}">×${num(m.value, 2)}</span></span></div>
+    <div class="pb">
+      ${bar("drawdown", c.dd_throttle)}${bar("streak", c.streak)}${bar("vol", c.vol_scalar)}${bar("edge", c.edge_bonus)}
+      <div class="note">${(m.reasons || []).map(esc).join(" · ")}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+        ${en.entry_blocked ? `<span class="pill rejected">ENTRIES GATED</span>` : `<span class="pill up">ENTRIES OPEN</span>`}
+        ${en.halted ? `<span class="pill rejected">HALTED · ${esc(en.halt_kind || "")}</span>` : ""}
+        <span class="pill">${esc((snap.vol_regime || "normal").toUpperCase())} VOL</span>
+      </div>
+    </div>
+    <div class="pb grid3">
+      <div class="stat"><div class="k">Sharpe 30d</div><div class="v num">${snap.daily_sharpe_30d == null ? "—" : num(snap.daily_sharpe_30d, 2)}</div></div>
+      <div class="stat"><div class="k">Drawdown</div><div class="v num ${(snap.drawdown || 0) < -0.05 ? "dn" : ""}">${pctf(snap.drawdown)}</div></div>
+      <div class="stat"><div class="k">Week</div><div class="v num ${(snap.week_change || 0) < 0 ? "dn" : "up"}">${pctf(snap.week_change)}</div></div>
+      <div class="stat"><div class="k">Trade exp 30</div><div class="v num">${pctf(snap.trade_expectancy_30, 3)}</div></div>
+    </div></div>`;
+      }
+      // 3) strategy scorecard
+      const cards = (ln && ln.scorecard) ? Object.values(ln.scorecard) : [];
+      if (cards.length) {
+        cards.sort((a, b) => b.n - a.n);
+        html += `<div class="panel"><div class="ph">Strategy scorecard · live vs certified backtest <span class="right mut">${cards.length} strategies</span></div>
+    <table><thead><tr><th>Strategy</th><th>n</th><th>WR</th><th>Exp</th><th>PF</th><th>Slip bps</th><th>BT exp</th><th>DSR</th><th>Conf</th><th>×</th><th>State</th></tr></thead><tbody>
+    ${cards.map(c => { const st = c.state, pc = st === "PROMOTED" ? "up" : st === "DEMOTED" ? "rejected" : ""; const bt = c.backtest || {};
+          return `<tr><td><span class="sym">${esc(c.strategy)}</span></td>
+      <td class="num">${c.n}</td><td class="num">${pctf(c.win_rate, 0)}</td>
+      <td class="num ${c.expectancy >= 0 ? "up" : "dn"}">${pctf(c.expectancy, 2)}</td>
+      <td class="num">${c.profit_factor == null ? "—" : num(c.profit_factor, 2)}</td>
+      <td class="num">${c.avg_slippage_bps == null ? "—" : num(c.avg_slippage_bps, 1)}</td>
+      <td class="num">${bt.test_exp == null ? "—" : pctf(bt.test_exp, 2)}</td>
+      <td class="num">${bt.dsr == null ? "—" : num(bt.dsr, 2)}</td>
+      <td class="num">${pctf(c.confidence, 2)}</td>
+      <td class="num">${num(c.multiplier, 2)}</td>
+      <td><span class="pill ${pc}">${esc(st)}</span></td></tr>`; }).join("")}
+    </tbody></table>
+    <div class="note">Live outcomes shrunk onto the certified backtest prior. DEMOTED = live edge below backtest (half-sized + INBOX); PROMOTED = proven above (size up, capped 1.5×). Never sizes up on losses.</div></div>`;
+      }
+      // 4) agent scorecard
+      const ags = (ln && ln.agent_scores) ? ln.agent_scores : [];
+      if (ags.length) {
+        html += `<div class="panel"><div class="ph">Committee critique quality</div>
+    <table><thead><tr><th>Flag</th><th>n flagged</th><th>Exp flagged</th><th>Exp unflagged</th><th>Verdict</th></tr></thead><tbody>
+    ${ags.map(a => `<tr><td>${esc(a.flag)}</td><td class="num">${a.n_flagged}</td>
+      <td class="num ${a.exp_flagged >= 0 ? "up" : "dn"}">${pctf(a.exp_flagged, 2)}</td>
+      <td class="num ${a.exp_unflagged >= 0 ? "up" : "dn"}">${pctf(a.exp_unflagged, 2)}</td>
+      <td><span class="pill ${a.verdict === "predictive" ? "up" : ""}">${esc(a.verdict)}</span></td></tr>`).join("")}
+    </tbody></table>
+    <div class="note">Were the specialists' warnings predictive? A flag is 'predictive' when the trades it warned about did materially worse.</div></div>`;
+      }
+      // 5) decision log
+      const dec = (ln && ln.decisions) ? ln.decisions.slice(0, 20) : [];
+      html += `<div class="panel"><div class="ph">Decision log · promote / demote / exit-tune <span class="right mut">last ${dec.length}</span></div>
+    <div style="max-height:36vh;overflow-y:auto">
+    ${dec.length ? dec.map(d => `<div class="logline"><span class="pill ${d.action === "promote" ? "up" : d.action === "demote" ? "rejected" : ""}">${esc(d.action)}</span>
+      <b>${esc(d.strategy)}</b> — ${esc(d.reason)} <span class="mut">${d.ts ? ago(d.ts) : ""}</span></div>`).join("")
+          : `<div class="pb mut">No learning decisions yet — the nightly pass records promote/demote/exit-tune here as live evidence accrues.</div>`}
+    </div></div>`;
+      return html;
     }
 
     function vAgents() {
@@ -3755,7 +3893,7 @@
     /* ============================================================ render */
     const VIEWS = {
       markets: vMarkets, security: vSecurity, portfolio: vPortfolio,
-      risk: vRisk, agents: vAgents, strats: vStrats, universe: vUniverse, audit: vAudit, journal: vJournals, industry: vIndustry, options: vOptions, calendar: vCalendar, screen: vScreen, alerts: vAlerts, data: vData, launch: vLaunch, inbox: vInbox, plan: vPlan
+      risk: vRisk, perf: vPerf, agents: vAgents, strats: vStrats, universe: vUniverse, audit: vAudit, journal: vJournals, industry: vIndustry, options: vOptions, calendar: vCalendar, screen: vScreen, alerts: vAlerts, data: vData, launch: vLaunch, inbox: vInbox, plan: vPlan
     };
     function render(scroll) {
       // header
@@ -3772,9 +3910,14 @@
       $("#ledtxt").textContent = anyOn ? "AGENTS 24/7" : "AGENTS OFF";
       $("#killbtn").className = S.halted ? "halted" : "";
       $("#killbtn").textContent = S.halted ? "HALTED" : "KILL";
-      // tabs
+      // tabs — only touch the DOM when the markup actually changes (the "on"
+      // class only moves on navigation), so a data-only re-render doesn't
+      // rebuild #tabs/#rail every cycle
       const tabsHtml = TABS.map(([p, l]) => `<button data-nav="${p}" class="${S.page === p ? "on" : ""}">${l}</button>`).join("");
-      $("#tabs").innerHTML = tabsHtml; $("#rail").innerHTML = tabsHtml;
+      if (S._tabsHtml !== tabsHtml) {
+        $("#tabs").innerHTML = tabsHtml; $("#rail").innerHTML = tabsHtml;
+        S._tabsHtml = tabsHtml;
+      }
       // page
       $("#view").innerHTML = (VIEWS[S.page] || vMarkets)();
       // post-render wiring
@@ -3783,6 +3926,11 @@
         drawSpark(cv, q.spark, q.spark.at(-1) >= q.spark[0])
       });
       if (S.page === "industry") drawPie();
+      if (S.page === "perf") {
+        const cv = $("#eqcurve");
+        if (cv) drawEquityCurve(cv, (S.riskgov && S.riskgov.curve) || []);
+        pollPerf();                              // refresh on entry (debounced)
+      }
       if (S.page === "options") {
         drawSmiles(); drawPayoff();
         if (S.options && S.options.underlying) loadOptStrat(S.options.underlying, S.optStratPreset || "straddle");
@@ -3950,6 +4098,7 @@
           const tds = tr.querySelectorAll("td"); if (tds.length < 3) return;
           tds[1].textContent = fmt(q.last, pxd(s));
           const ch = chgOf(s); tds[2].textContent = pct(ch); tds[2].className = "num " + cls(ch);
+          tr.style.opacity = q.stale ? "0.45" : "";   // dim a stale (>15s) quote
         });
         $$("canvas.spark").forEach(cv => {
           const s = cv.dataset.spark, q = S.quotes[s];
@@ -3977,11 +4126,21 @@
     /* ============================================================ tape */
     function tapeFill() {
       const inner = $("#tape-inner");
-      const mk = UNIVERSE.map(([s]) => {
-        const ch = chgOf(s);
-        return `<span class="tp" data-sym="${s}"><b>${s}</b><span class="num ${cls(ch)}">${fmt(S.quotes[s].last, pxd(s))} ${pct(ch, 1)}</span></span>`
-      }).join("");
-      inner.innerHTML = mk + mk;
+      // build the span scaffold ONCE (the symbol set is static); thereafter only
+      // update each value's textContent/className in place — no innerHTML churn
+      // on every WS tick (this ran ~1/s and rebuilt the whole tape each time).
+      const key = UNIVERSE.map(([s]) => s).join(",");
+      if (S._tapeKey !== key || !inner.firstChild) {
+        S._tapeKey = key;
+        const mk = UNIVERSE.map(([s]) => `<span class="tp" data-tsym="${s}"><b>${s}</b> <span class="num" data-tval></span></span>`).join("");
+        inner.innerHTML = mk + mk;               // two copies for the marquee loop
+      }
+      inner.querySelectorAll(".tp[data-tsym]").forEach(sp => {
+        const s = sp.dataset.tsym, q = S.quotes[s]; if (!q) return;
+        const ch = chgOf(s), v = sp.querySelector("[data-tval]"); if (!v) return;
+        v.textContent = `${fmt(q.last, pxd(s))} ${pct(ch, 1)}`;
+        v.className = "num " + cls(ch);
+      });
     }
     let tapeX = 0;
     function tapeAnim() {
@@ -4270,6 +4429,7 @@
         connectWS();                  // server-push quotes+account (falls back to polling)
         pollInbox(); setInterval(pollInbox, 20000);   // proposal inbox + tab badge
         pollPlan(); setInterval(pollPlan, 15000);     // daily plan + auto-trader status
+        setInterval(() => { if (S.page === "perf") pollPerf(true); }, 30000);   // PERF: learning + governor
       }
     })();
   </script>
