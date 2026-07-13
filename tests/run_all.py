@@ -19,7 +19,7 @@ SELFTEST_MODULES = [
     "qtsys.portfolio_risk", "qtsys.arb.pairs", "qtsys.arb.triangular",
     "qtsys.arb.cip", "qtsys.optstrat", "qtsys.proposals",
     "qtsys.tradeplan", "qtsys.autotrader", "qtsys.optexec", "qtsys.copilot", "qtsys.actions",
-    "qtsys.learning",
+    "qtsys.learning", "qtsys.riskgov",
 ]
 NETWORK_OK_TO_SKIP = {"qtsys.portfolio_risk"}   # needs bundled data refresh
 

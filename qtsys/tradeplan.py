@@ -139,6 +139,12 @@ def draft(data: dict) -> dict:
     equity = data.get("equity") or 0.0
     posture = data.get("posture", "BALANCED")
     risk_pct = RISK_PCT.get(posture, 0.015)
+    # ADAPTIVE RISK GOVERNOR: a book-level multiplier (drawdown throttle × streak
+    # × vol regime × proven-edge bonus, already bounded [0.25,1.5] by riskgov)
+    # scales risk per trade. Applied BEFORE the small-account floor so a tiny
+    # book can still be floored up to a tradable size, and re-clamped here so a
+    # bad input can never breach the bright line.
+    risk_pct *= _clamp(float(data.get("risk_multiplier", 1.0) or 1.0), MULT_LO, MULT_HI)
     # SMALL-ACCOUNT GROWTH MODE: a percent of tiny equity is dust ($250 x 1.5%
     # = $3.75 risk -> unmovable positions). The server passes a $ risk floor
     # for small books; it lifts risk_pct so each trade risks at least that,
@@ -224,6 +230,9 @@ def draft(data: dict) -> dict:
             "equity": equity, "risk_pct": risk_pct,
             "ideas": sized[:MAX_IDEAS], "critiques": [], "notes": "",
             "holds": holds, "status": "draft", "ts": time.time(),
+            # correlation clusters carried through to the executor so its entry
+            # gate can count open positions per cluster against the whole book
+            "clusters": [sorted(c) for c in data.get("clusters", [])],
             "unsized_skipped": len(ideas) - len(sized)}
 
 
@@ -518,6 +527,19 @@ def _selftest():
         "roll_high_252": {"atr_stop": 2.5, "r_multiple": 3.0}}))["ideas"]
         if i["symbol"] == "AAPL")
     assert aapl_ep["rr"] == 3.0 and abs((aapl_ep["entry"] - aapl_ep["stop"]) - 2.5 * 4.0) < 0.01
+    # adaptive risk governor: a book-level risk_multiplier scales risk_amt,
+    # applied before the small-account floor and still bounded by the caps
+    aapl_rm = next(i for i in draft(dict(ldata, risk_multiplier=0.5))["ideas"]
+                   if i["symbol"] == "AAPL")
+    assert abs(aapl_rm["risk_amt"] - aapl_base["risk_amt"] * 0.5) < 0.5, aapl_rm["risk_amt"]
+    aapl_rm15 = next(i for i in draft(dict(data, risk_multiplier=1.5))["ideas"]
+                     if i["symbol"] == "AAPL")
+    assert aapl_rm15["notional"] <= 25_000 + 1, "notional cap holds at 1.5x mult"
+    # the governor multiplier is clamped at the consumer too (never > 1.5x)
+    aapl_rmbig = next(i for i in draft(dict(ldata, risk_multiplier=5.0))["ideas"]
+                      if i["symbol"] == "AAPL")
+    assert aapl_rmbig["risk_amt"] <= aapl_base["risk_amt"] * 1.5 + 0.5, aapl_rmbig["risk_amt"]
+
     # demotion: a verified strategy the learning pass demoted is de-verified,
     # DSR-nulled, half-sized and INBOX-routed — exactly like an unverified idea.
     # Use the default-cap data so the leverage trim doesn't drop AAPL first.

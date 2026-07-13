@@ -38,13 +38,16 @@ def _env_flag(name: str, default=False) -> bool:
 
 class AutoTrader:
     def __init__(self, gateway, broker, vmap=None, log=None, notify=None,
-                 db_path=None):
+                 db_path=None, riskgov=None):
         self.gw = gateway
         self.broker = broker
         self.vmap = vmap or {}
         self.rmap = {v: k for k, v in self.vmap.items()}
         self.log = log or (lambda *a, **k: None)
         self.notify = notify or (lambda *a, **k: None)
+        # optional adaptive risk governor: gates entries during a weekly-loss
+        # lockout (its multiplier already shapes sizing upstream in the planner)
+        self.riskgov = riskgov
         # execute_plan (entries) and monitor (exits) both mutate live orders and
         # run from MULTIPLE threads (the 30s monitor loop via to_thread, the PM
         # agent in the event loop, and endpoints). Serialize them so the same
@@ -204,9 +207,12 @@ class AutoTrader:
         self._set("orders:" + self._today(), self._orders_today() + 1)
 
     def _realized_today(self) -> float:
-        r = self.db.execute("SELECT COALESCE(SUM(realized),0) FROM managed WHERE "
-                            "status='closed' AND plan_date=?",
-                            (self._today(),)).fetchone()
+        # book P&L against the day it was REALISED (close time), not the plan
+        # date — a position opened yesterday and closed today must count today.
+        r = self.db.execute(
+            "SELECT COALESCE(SUM(realized),0) FROM managed WHERE status='closed' "
+            "AND date(closed_ts,'unixepoch','localtime')=?",
+            (self._today(),)).fetchone()
         return float(r[0] or 0.0)
 
     def open_positions(self) -> list[dict]:
@@ -232,6 +238,13 @@ class AutoTrader:
                     "paper trading days proven — keep running on paper")
         if getattr(self.gw, "halted", False):
             return "kill switch active"
+        if self.riskgov is not None:               # weekly-loss lockout
+            try:
+                blk = self.riskgov.entry_blocked()
+                if blk:
+                    return blk
+            except Exception:
+                pass
         eq = 0.0
         try:
             eq = float(self.broker.get_account().get("equity") or 0)
@@ -247,6 +260,19 @@ class AutoTrader:
 
     def _venue(self, sym: str) -> str:
         return self.vmap.get(sym, sym)
+
+    def _cluster_full(self, sym: str, clusters, held) -> str | None:
+        """Reason if opening `sym` would put >2 positions in any correlation
+        cluster it belongs to, given the symbols the book already holds; else
+        None. Two correlated positions are allowed; the third is refused."""
+        for grp in clusters:
+            if sym in grp:
+                n = sum(1 for s in held if s != sym and s in grp)
+                if n >= 2:
+                    return (f"correlation cluster {'+'.join(sorted(grp))} already "
+                            f"holds {n} positions — capped at 2 to limit "
+                            "concentrated risk")
+        return None
 
     # ------------------------------------------------------------ execution
     def execute_plan(self, plan: dict) -> dict:
@@ -293,6 +319,13 @@ class AutoTrader:
                                      + abs(p["qty"] * p["entry"]))
         managed_ospreads = {p["symbol"] for p in self.open_positions()
                             if p.get("kind") == "ospread"}
+        # CORRELATION-CLUSTER GATE inputs: the plan carries the correlation
+        # clusters (from the risk model); track every engine symbol the WHOLE
+        # book already holds (managed + venue positions) so the gate counts
+        # against real exposure, not just this draft. Names entered during this
+        # run are added as we go so we can't open a 3rd correlated name at once.
+        clusters = plan.get("clusters", []) or []
+        held_engine = set(existing) | {self.rmap.get(v, v) for v in book}
         for idea in plan.get("ideas", []):
             sym = idea["symbol"]
             # STANDALONE volatility / option-structure idea (a straddle, condor,
@@ -334,6 +367,9 @@ class AutoTrader:
                 skipped.append((sym, f"pending order already working for {vsym} "
                                 "— not double-entering before it fills"))
                 continue
+            full = self._cluster_full(sym, clusters, held_engine)
+            if full and not is_increase:            # correlation concentration
+                skipped.append((sym, full)); continue
             if self._orders_today() >= self.max_orders_day:
                 skipped.append((sym, "daily order cap")); continue
             if len(self.open_positions()) >= self.max_concurrent:
@@ -383,6 +419,7 @@ class AutoTrader:
             exposure[sym] = exposure.get(sym, 0.0) + want
             done += 1
             existing.add(sym)
+            held_engine.add(sym)                    # count toward the cluster gate
             self.log("AutoTrader",
                      f"ENTERED {side.upper()} {idea['qty']} {sym} @~{idea['entry']} "
                      f"(stop {idea['stop']} / target {idea['target']})", "warn")
@@ -792,6 +829,29 @@ def _selftest():
     crow = at.db.execute("SELECT exit_reason FROM managed WHERE symbol='SPYV' "
                          "AND status='closed'").fetchone()
     assert crow and crow[0] == "target", crow
+
+    # correlation-cluster gate: at most 2 positions per cluster — a 3rd
+    # correlated entry in the same run is refused (counts the whole book)
+    at2 = AutoTrader(_FakeGW(), _FakeBroker(), db_path=tempfile.mktemp(suffix=".db"))
+    at2.set_enabled(True)
+    cl = [["CA", "CB", "CC"]]
+    trio = {"date": at2._today(), "clusters": cl, "ideas": [
+        {"symbol": s, "side": "LONG", "qty": 1, "entry": 100.0, "stop": 96.0,
+         "target": 108.0, "notional": 100.0, "verified": True}
+        for s in ("CA", "CB", "CC")]}
+    rc = at2.execute_plan(trio)
+    assert rc["executed"] == 2, ("cluster caps at 2", rc)
+    assert any(s[0] == "CC" and "cluster" in s[1].lower() for s in rc["skipped"]), \
+        ("3rd correlated entry skipped", rc["skipped"])
+
+    # risk-governor weekly-loss gate blocks entries via _blocked()
+    class _GateGov:
+        def entry_blocked(self):
+            return "weekly loss gate active — new entries blocked until next week"
+    at3 = AutoTrader(_FakeGW(), _FakeBroker(), db_path=tempfile.mktemp(suffix=".db"),
+                     riskgov=_GateGov())
+    at3.set_enabled(True)
+    assert at3.execute_plan(plan)["blocked"].startswith("weekly loss gate"), "gov gate"
 
     print("autotrader self-test ✓  disarmed default, enter->TP profit->SL loss, "
           "gateway routed, per-symbol cap, DSR gate, live-without-flag refused, "

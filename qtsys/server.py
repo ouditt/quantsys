@@ -277,11 +277,23 @@ async def boot() -> None:
     from .tradeplan import PlanStore
     from .autotrader import AutoTrader
     state["planstore"] = PlanStore()
+    # adaptive risk governor: records the live equity curve, computes the
+    # book-level size multiplier, and enforces weekly-loss / max-drawdown
+    # circuit breakers. VIX (analyse-only) feeds its vol-regime de-risking.
+    from .riskgov import RiskGovernor
+    _notify = lambda t, b="", p="normal": __import__(
+        "qtsys.notify", fromlist=["send"]).send(t, b, p)
+    def _vix_now():
+        try:
+            v = state["daemon"].context["quotes"].get("VIX", {}).get("last")
+            return float(v) if v else None
+        except Exception:
+            return None
+    state["riskgov"] = RiskGovernor(journal_db=os.path.join(HERE, "journal.db"),
+                                    log=daemon.log, notify=_notify, vix_fn=_vix_now)
     state["autotrader"] = AutoTrader(
         gw, broker, vmap=VENUE_SYMBOLS.get(venue) or {},
-        log=daemon.log,
-        notify=lambda t, b="", p="normal": __import__(
-            "qtsys.notify", fromlist=["send"]).send(t, b, p))
+        log=daemon.log, notify=_notify, riskgov=state["riskgov"])
     daemon.autotrader = state["autotrader"]
     daemon.planstore = state["planstore"]
     daemon.build_plan = lambda: _build_and_adopt_plan(execute=False)
@@ -365,6 +377,19 @@ async def _tick_loop() -> None:
                                 f"today's open {broker.day_open_equity:,.0f}", "normal")
                 except Exception:
                     pass
+        # adaptive risk governor: append the live equity point (self-throttled
+        # to ~1/min) and run the weekly-loss / max-drawdown circuit breakers.
+        # Fully guarded — a governor error must never stall the quote loop.
+        rg = state.get("riskgov")
+        if rg is not None:
+            try:
+                acct = await asyncio.to_thread(broker.get_account)
+                eq = float(acct.get("equity") or 0)
+                if eq > 0:
+                    await asyncio.to_thread(rg.record_equity, eq)
+                    await asyncio.to_thread(rg.enforce, gw)
+            except Exception:
+                pass
         limit = float(os.environ.get("QTSYS_DAY_LOSS_LIMIT", "-0.05"))
         day = _day_change(broker)
         if not gw.halted and day is not None and day <= limit:
@@ -1188,7 +1213,36 @@ def account():
     a["day_change"] = round(dc, 4) if dc is not None else None
     a["day_loss_limit"] = float(os.environ.get("QTSYS_DAY_LOSS_LIMIT", "-0.05"))
     a["day_baseline"] = getattr(state["broker"], "day_open_equity", None)
+    # real drawdown from the persistent equity curve (the broker's get_account
+    # hardcodes 0.0); the governor tracks all-time peak self-anchored.
+    rg = state.get("riskgov")
+    if rg is not None:
+        try:
+            a["drawdown"] = rg.snapshot()["drawdown"]
+        except Exception:
+            pass
     return a
+
+
+@app.get("/api/riskgov")
+async def riskgov_view():
+    """The adaptive risk governor: downsampled equity curve, current snapshot
+    (equity/peak/drawdown/weekly/Sharpe/vol-regime), the live multiplier with
+    its components + reasons, the recent gov-log, and enforcement flags."""
+    rg = state.get("riskgov")
+    if rg is None:
+        return {"enabled": False}
+
+    def _build():
+        curve = rg._curve()
+        step = max(1, len(curve) // 400)          # downsample to ~400 points
+        pts = [{"ts": t, "equity": e} for t, e in curve[::step]]
+        return {"enabled": True, "curve": pts, "snapshot": rg.snapshot(),
+                "multiplier": rg.multiplier(), "gov_log": rg.gov_log(50),
+                "enforcement": {"entry_blocked": rg.entry_blocked(),
+                                "halted": state["gw"].halted,
+                                "halt_kind": getattr(state["gw"], "halt_kind", "")}}
+    return await asyncio.to_thread(_build)
 
 
 @app.get("/api/positions")
@@ -1531,10 +1585,21 @@ def _assemble_plan_data() -> dict:
         learn = learning.plan_inputs()
     except Exception:
         pass
+    # adaptive risk governor: the book-level size multiplier (defaults 1.0 with
+    # an empty equity curve -> sizing unchanged). Applied in tradeplan.draft
+    # BEFORE the small-account floor, re-clamped to [0.25,1.5] there.
+    risk_multiplier = 1.0
+    rg = state.get("riskgov")
+    if rg is not None:
+        try:
+            risk_multiplier = rg.multiplier()["value"]
+        except Exception:
+            pass
     return {
         "equity": eq, "posture": state.get("posture", "BALANCED"),
         "holdings": holdings,
         "risk_floor_amt": risk_floor,
+        "risk_multiplier": risk_multiplier,
         "strategy_multiplier": learn.get("strategy_multiplier", {}),
         "demoted": learn.get("demoted", {}),
         "exit_params": learn.get("exit_params", {}),
