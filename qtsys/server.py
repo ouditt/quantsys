@@ -15,6 +15,7 @@ import math
 import os
 import time
 
+from . import errlog
 from .agents import AgentDaemon
 from .brokers import ExecutionGateway, Order, PaperBroker, RiskLimits
 from .data import load_real
@@ -65,6 +66,37 @@ app = FastAPI(title="qtsys terminal API")
 # the API nor fire mutations (the localhost-CSRF hole this closes).
 
 state: dict = {}
+
+
+def _errlog_log():
+    """The agent-daemon log callable, if the daemon is up — so errlog lines land
+    in the same stream operators already watch."""
+    d = state.get("daemon")
+    return d.log if d is not None else None
+
+
+# last-good payload per slow endpoint, so a timeout degrades to stale data
+# instead of a spinner or a 500.
+_last_good: dict[str, dict] = {}
+
+
+async def _served(key: str, build, timeout: float = 20.0) -> dict:
+    """Run a slow builder (an async thunk) under a timeout with a last-good
+    cache. On timeout/error: return the last good payload marked stale, or a
+    `{"error":"timeout","stale":true}` stub if we have never succeeded. The
+    failure is counted in errlog so it is visible in /api/health."""
+    try:
+        res = await asyncio.wait_for(build(), timeout)
+        if isinstance(res, dict):
+            _last_good[key] = res
+        return res
+    except Exception as e:
+        errlog.report(f"endpoint:{key}", e, log=_errlog_log())
+        cached = _last_good.get(key)
+        if cached is not None:
+            return {**cached, "stale": True}
+        return {"error": "timeout", "stale": True}
+
 
 import secrets as _secrets
 
@@ -270,7 +302,8 @@ async def boot() -> None:
                 if px:
                     out[sym] = out.get(sym, 0.0) + p.qty * px / eq
             return {k: round(v, 4) for k, v in out.items() if abs(v) > 1e-4}
-        except Exception:
+        except Exception as e:
+            errlog.report("live_weights", e, log=daemon.log)
             return {}
     daemon.context["weights"] = _live_weights
     # daily trade plan + guarded auto-execution engine
@@ -319,7 +352,7 @@ async def boot() -> None:
     _load_alerts()
     asyncio.create_task(_tick_loop())
     asyncio.create_task(_daily_scan_loop())      # auto-run the morning scan daily
-    asyncio.create_task(_prewarm_screener())     # warm the fundamentals cache
+    asyncio.create_task(_screen_refresh_loop())  # warm + refresh the screen cache
     asyncio.create_task(_alerts_loop())          # evaluate alerts continuously
     asyncio.create_task(_autotrader_loop())      # TP/SL monitor for auto-trades
     asyncio.create_task(_intraday_scan_loop())   # live intraday opportunities -> INBOX
@@ -333,24 +366,55 @@ async def _tick_loop() -> None:
     REAL recorded close (marked with its date). No replay, no simulated tape."""
     broker = state["broker"]
     dead: set[str] = set()          # symbols this venue has refused to quote
+    get_quotes = getattr(broker, "get_quotes", None)
     while True:
         q = state["daemon"].context["quotes"]
-        for sym, bars in state["hist"].items():
-            last_close, prev_close = bars[-1]["c"], bars[-2]["c"]
-            price, asof = None, bars[-1]["t"]
-            vmap = state.get("vmap")
+        vmap = state.get("vmap")
+        # collect the tradable venue symbols to quote this cycle
+        want: list[tuple[str, str]] = []
+        for sym in state["hist"]:
             vsym = sym if vmap is None else vmap.get(sym)
             if sym in TRADABLE and vsym and sym not in dead:
+                want.append((sym, vsym))
+        # BATCHED fetch: one equity + one crypto call for Alpaca (get_quotes),
+        # else a concurrent per-symbol gather. Whole fetch is time-boxed so a
+        # slow venue can't stall the loop; on timeout we fall back to last close.
+        by_v: dict[str, float] = {}
+        batched_ok = False
+        if want and get_quotes:
+            try:
+                by_v = await asyncio.wait_for(
+                    asyncio.to_thread(get_quotes, [v for _, v in want]), 2.5)
+                batched_ok = True
+            except Exception as e:
+                errlog.report("tick_get_quotes", e, log=_errlog_log())
+        elif want:                              # broker without batch support
+            async def _one(v):
                 try:
-                    p = await asyncio.to_thread(broker.get_quote, vsym)
-                    if p and not math.isnan(p):
-                        price, asof = p, "live"
-                except Exception:
-                    dead.add(sym)            # venue doesn't serve this symbol
+                    return v, await asyncio.to_thread(broker.get_quote, v)
+                except Exception as e:
+                    errlog.report("tick_get_quote", e, log=_errlog_log())
+                    return v, None
+            for v, p in await asyncio.gather(*[_one(v) for _, v in want]):
+                if p is not None:
+                    by_v[v] = p
+            batched_ok = True
+        now = time.time()
+        for sym, bars in state["hist"].items():
+            last_close, prev_close = bars[-1]["c"], bars[-2]["c"]
+            price, asof, qts = None, bars[-1]["t"], None
+            vsym = sym if vmap is None else vmap.get(sym)
+            if sym in TRADABLE and vsym and sym not in dead:
+                p = by_v.get(vsym)
+                if p is not None and not math.isnan(p):
+                    price, asof, qts = p, "live", now
+                elif batched_ok and vsym not in by_v:
+                    dead.add(sym)            # venue returned nothing -> unserved
+                                             # (both the batched and gather paths)
             if price is None:
                 price = last_close
-            q[sym] = {"last": price,
-                      "chg_pct": (price / prev_close - 1) * 100, "asof": asof}
+            q[sym] = {"last": price, "chg_pct": (price / prev_close - 1) * 100,
+                      "asof": asof, "ts": qts}
         # deterministic daily-loss circuit breaker, measured against the real
         # day baseline (prev-day close). Threshold is operator-tunable via
         # QTSYS_DAY_LOSS_LIMIT (default -0.05); re-baselines each new calendar
@@ -415,10 +479,14 @@ def _quote_row(sym: str) -> dict:
     live = state["daemon"].context["quotes"].get(sym, {})
     last = live.get("last", bars[-1]["c"])
     prev = bars[-2]["c"]
+    qts = live.get("ts")
+    # a live quote older than 15s (venue stall / dead symbol) is flagged so the
+    # UI can dim it instead of showing a stale price as if it were fresh
+    stale = bool(live.get("asof") == "live" and qts and (time.time() - qts) > 15)
     return {"symbol": sym, "name": name, "cls": cls, "last": last,
             "chg": last - prev, "chg_pct": (last / prev - 1) * 100,
             "asof": live.get("asof", bars[-1]["t"]), "tradable": sym in TRADABLE,
-            "spark": [b["c"] for b in bars[-40:]]}
+            "ts": qts, "stale": stale, "spark": [b["c"] for b in bars[-40:]]}
 
 
 def _tracking() -> dict:
@@ -431,7 +499,16 @@ def health(): return {"ok": True, "mode": "live",
                       "venue": state.get("venue", "?"),
                       "posture": state.get("posture", "BALANCED"),
                       "note": "live venue quotes and fills; no simulation",
+                      "errors": errlog.stats(),
                       "ts": time.time()}
+
+
+@app.get("/api/errors")
+def errors():
+    """Per-key counters of swallowed hot-path failures — makes an otherwise
+    invisible, recurring error (a dead fills fetcher, a flaky intel source)
+    countable and surfaced without crashing the loop that hit it."""
+    return errlog.stats()
 
 
 @app.get("/api/quotes")
@@ -459,15 +536,15 @@ async def ws_stream(ws: WebSocket):
                     payload["account"] = await asyncio.to_thread(
                         lambda: {**state["broker"].get_account(),
                                  "halted": state["gw"].halted})
-                except Exception:
-                    pass
+                except Exception as e:
+                    errlog.report("ws_account", e, log=_errlog_log())
             acct_i += 1
             await ws.send_json(payload)
             await asyncio.sleep(1)
     except WebSocketDisconnect:
         pass
-    except Exception:
-        pass
+    except Exception as e:
+        errlog.report("ws_stream", e, log=_errlog_log())
 
 
 @app.get("/api/history/{sym}")
@@ -637,10 +714,10 @@ async def _alerts_loop():
                     try:
                         from . import notify
                         notify.send(f"QTSYS alert · {a['symbol']}", msg, "high")
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+                    except Exception as e:
+                        errlog.report("alert_notify", e, log=_errlog_log())
+        except Exception as e:
+            errlog.report("alerts_loop", e, log=_errlog_log())
         await asyncio.sleep(8)
 
 
@@ -796,8 +873,11 @@ async def data_api(symbols: str, fields: str = "last,chg_pct", format: str = "js
     flds = [f.strip() for f in fields.split(",") if f.strip() and f.strip() in _FIELDS]
     if not syms or not flds:
         raise HTTPException(400, "need symbols and valid fields (see /api/data/fields)")
-    rows = await asyncio.to_thread(
-        lambda: [dict(symbol=s, **_data_row(s, flds)) for s in syms])
+    async def _build():
+        return {"fields": flds, "rows": await asyncio.to_thread(
+            lambda: [dict(symbol=s, **_data_row(s, flds)) for s in syms])}
+    res = await _served(f"data:{','.join(syms)}:{','.join(flds)}", _build, 20.0)
+    rows = res.get("rows", [])
     if format == "csv":
         import csv
         import io
@@ -808,15 +888,39 @@ async def data_api(symbols: str, fields: str = "last,chg_pct", format: str = "js
         for r in rows:
             w.writerow([r.get("symbol")] + [r.get(f) for f in flds])
         return PlainTextResponse(buf.getvalue(), media_type="text/csv")
-    return {"fields": flds, "rows": rows}
+    return res
+
+
+SCREEN_TTL = 900        # 15 min — the screener is a slow ~180-symbol fan-out
 
 
 @app.get("/api/screen")
 async def screen():
-    """Fundamental screener universe: sector constituents + your book +
-    watchlist, each enriched with fundamentals (yfinance) and the last daily
-    scan's technicals. Client filters/sorts. Pre-warmed on boot for speed."""
-    return {"rows": await asyncio.to_thread(_screen_rows, state["broker"])}
+    """Fundamental screener universe: served from a background-refreshed
+    snapshot (state["screen_cache"]) so the endpoint returns instantly with a
+    `stale` flag instead of re-running the ~180-symbol fundamentals fan-out on
+    every request. Builds on demand only when the cache is still empty."""
+    cache = state.get("screen_cache")
+    if not cache or not cache.get("rows"):
+        rows = await asyncio.to_thread(_screen_rows, state["broker"])
+        cache = {"rows": rows, "asof": time.time()}
+        state["screen_cache"] = cache
+    asof = cache.get("asof", 0)
+    return {"rows": cache["rows"], "asof": asof,
+            "stale": (time.time() - asof) > SCREEN_TTL}
+
+
+async def _screen_refresh_loop():
+    """Refresh the screener snapshot every SCREEN_TTL seconds in the background,
+    so /api/screen is always warm. First refresh runs shortly after boot."""
+    await asyncio.sleep(5)                        # let boot settle
+    while True:
+        try:
+            rows = await asyncio.to_thread(_screen_rows, state["broker"])
+            state["screen_cache"] = {"rows": rows, "asof": time.time()}
+        except Exception as e:
+            errlog.report("screen_refresh", e, log=_errlog_log())
+        await asyncio.sleep(SCREEN_TTL)
 
 
 def _screen_rows(broker) -> list[dict]:
@@ -837,7 +941,8 @@ def _screen_rows(broker) -> list[dict]:
     def one(s):
         try:
             return s, (intel.fundamentals(s, "Equity").get("metrics") or {})
-        except Exception:
+        except Exception as e:
+            errlog.report("intel_fundamentals", e, log=_errlog_log())
             return s, {}
     rows = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=24) as ex:
@@ -873,10 +978,12 @@ async def calendar():
     syms.update(v for v in (state.get("vmap") or {}).values() if "/" not in v)
     for members in sectors.CONSTITUENTS.values():
         syms.update(members[:4])                 # a few bellwethers per sector
-    econ = await asyncio.to_thread(calendars.economic)
-    corp = await asyncio.to_thread(calendars.corporate, list(syms))
-    return {"economic": econ, "earnings": corp.get("earnings", []),
-            "dividends": corp.get("dividends", [])}
+    async def _build():
+        econ = await asyncio.to_thread(calendars.economic)
+        corp = await asyncio.to_thread(calendars.corporate, list(syms))
+        return {"economic": econ, "earnings": corp.get("earnings", []),
+                "dividends": corp.get("dividends", [])}
+    return await _served("calendar", _build, 20.0)
 
 
 @app.get("/api/options/{sym}")
@@ -886,7 +993,9 @@ async def options_chain(sym: str, exp: str = ""):
     broker = state["broker"]
     if not hasattr(broker, "option_chain"):
         raise HTTPException(400, "options need an Alpaca venue")
-    return await asyncio.to_thread(_build_chain, broker, sym.upper(), exp)
+    return await _served(f"options:{sym.upper()}:{exp}",
+                         lambda: asyncio.to_thread(_build_chain, broker, sym.upper(), exp),
+                         20.0)
 
 
 def _build_chain(broker, sym, exp) -> dict:
@@ -945,7 +1054,9 @@ async def industry(sym: str):
     """Sector of `sym` + its constituents, each with LIVE % change (computed in
     Python from Alpaca snapshots) and market-cap weight; plus the sector's
     market-cap-weighted daily change."""
-    return await asyncio.to_thread(_build_industry, state["broker"], sym)
+    return await _served(f"industry:{sym.upper()}",
+                         lambda: asyncio.to_thread(_build_industry, state["broker"], sym),
+                         20.0)
 
 
 def _build_industry(broker, sym) -> dict:
@@ -1415,16 +1526,6 @@ async def universe_scan(cap: int = 3000, tf: str = "1Day"):
 
     asyncio.create_task(_run_universe_scan(broker, watch, cap, prog, tf))
     return {"running": True, "cap": cap, "tf": tf, "watchlist": len(watch)}
-
-
-async def _prewarm_screener():
-    """Pre-fetch the screener universe's fundamentals so the SCREEN tab is
-    instant when first opened."""
-    await asyncio.sleep(20)
-    try:
-        await asyncio.to_thread(_screen_rows, state["broker"])
-    except Exception:
-        pass
 
 
 async def _daily_scan_loop():
@@ -1947,8 +2048,8 @@ async def _autotrader_loop():
             at = state.get("autotrader")
             if at and at.enabled:
                 await asyncio.to_thread(at.monitor)
-        except Exception:
-            pass
+        except Exception as e:
+            errlog.report("autotrader_loop", e, log=_errlog_log())
         await asyncio.sleep(30)
 
 

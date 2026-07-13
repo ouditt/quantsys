@@ -29,6 +29,7 @@ class ProposalStore:
     def __init__(self, db_path: str = DB_PATH):
         self.db = sqlite3.connect(db_path, check_same_thread=False)
         self.db.execute("PRAGMA busy_timeout=5000")
+        self.db.execute("PRAGMA journal_mode=WAL")     # concurrent read/write
         self.db.execute("""CREATE TABLE IF NOT EXISTS proposal(
             id INTEGER PRIMARY KEY, ts REAL, agent TEXT, kind TEXT,
             symbol TEXT, side TEXT, qty REAL, summary TEXT, payload TEXT,

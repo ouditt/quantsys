@@ -397,6 +397,7 @@ class PlanStore:
             db_path or os.path.join(os.path.dirname(__file__), "tradeplan.db"),
             check_same_thread=False)
         self.db.execute("PRAGMA busy_timeout=5000")
+        self.db.execute("PRAGMA journal_mode=WAL")     # concurrent read/write
         self.db.execute("CREATE TABLE IF NOT EXISTS plan("
                         "date TEXT PRIMARY KEY, ts REAL, status TEXT, doc TEXT)")
         self.db.commit()

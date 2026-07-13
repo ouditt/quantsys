@@ -378,7 +378,12 @@ class AlpacaBroker(Broker):
                             "price": float(o.filled_avg_price),
                             "ts": o.filled_at.timestamp() if o.filled_at else 0.0})
             return out
-        except Exception:
+        except Exception as e:
+            try:
+                from . import errlog
+                errlog.report("alpaca_fills", e)
+            except Exception:
+                pass
             return []
 
     def all_fills(self, after: str | None = None,
@@ -436,6 +441,38 @@ class AlpacaBroker(Broker):
             t = self.d.get_stock_latest_trade(
                 self._req["last"](symbol_or_symbols=symbol))
         return float(t[symbol].price)
+
+    def get_quotes(self, symbols: list[str]) -> dict:
+        """Batched latest-trade quotes: ONE equity call + ONE crypto call using
+        Alpaca's symbol-LIST requests, instead of N sequential round-trips (the
+        tick loop polls ~11 names every 3s). Options are skipped here (chain
+        pricing goes through _option_quote). Each bucket is best-effort — a
+        failing bucket contributes no entries rather than raising, so one bad
+        symbol can't blank the whole tape."""
+        out: dict[str, float] = {}
+        crypto = [s for s in symbols if "/" in s]
+        equity = [s for s in symbols if "/" not in s and not _is_option(s)]
+        if equity:
+            try:
+                r = self.d.get_stock_latest_trade(
+                    self._req["last"](symbol_or_symbols=equity))
+                for s in equity:
+                    v = r.get(s) if hasattr(r, "get") else r[s] if s in r else None
+                    if v is not None:
+                        out[s] = float(v.price)
+            except Exception:
+                pass
+        if crypto:
+            try:
+                r = self.dc.get_crypto_latest_trade(
+                    self._req["last_crypto"](symbol_or_symbols=crypto))
+                for s in crypto:
+                    v = r.get(s) if hasattr(r, "get") else r[s] if s in r else None
+                    if v is not None:
+                        out[s] = float(v.price)
+            except Exception:
+                pass
+        return out
 
     def option_spread_order(self, legs: list[dict], contracts: int,
                             limit_price: float, close: bool = False) -> dict:

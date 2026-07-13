@@ -33,6 +33,8 @@ BREACH_CODES = {"NONE": "no breach", "SIZE": "size differed from sizing.py outpu
 class Journal:
     def __init__(self, db_path: str | None = None):
         self.db = sqlite3.connect(db_path or os.path.join(HERE, "journal.db"))
+        self.db.execute("PRAGMA busy_timeout=5000")   # wait out brief contention
+        self.db.execute("PRAGMA journal_mode=WAL")     # concurrent read/write
         cols = ", ".join(f"{c} TEXT" for c in FIELDS_BEFORE + FIELDS_DURING + FIELDS_AFTER)
         self.db.execute(f"CREATE TABLE IF NOT EXISTS trades (ts REAL, {cols})")
         for col in ("mfe", "mae"):                 # migrate older journals
