@@ -1087,6 +1087,24 @@ async def risk_attribution():
     return await asyncio.to_thread(_calc)
 
 
+@app.get("/api/learning")
+async def learning_view():
+    """The learning scorecard: per-strategy live-vs-backtest stats + multiplier
+    + state, the promote/demote/exit-tune decision log, tuned exit params, and
+    the committee critique-quality scores. All deterministic, from live trades."""
+    def _build():
+        from . import learning
+        store = learning.LearningStore()
+        try:
+            return {"scorecard": learning.strategy_scorecard(),
+                    "decisions": store.decisions(50),
+                    "exit_params": store.exit_params(),
+                    "agent_scores": store.agent_scores(50)}
+        finally:
+            store.db.close()
+    return await asyncio.to_thread(_build)
+
+
 @app.get("/api/proposals")
 def proposals_list():
     """The agent -> action inbox: durable, de-duplicated actionable proposals."""
@@ -1504,10 +1522,22 @@ def _assemble_plan_data() -> dict:
     risk_floor = (float(os.environ.get("QTSYS_SMALL_MIN_RISK", "10"))
                   if eq and eq < float(os.environ.get("QTSYS_SMALL_ACCT", "3000"))
                   else 0.0)
+    # LEARNING FEEDBACK (deterministic, from live outcomes): bounded per-strategy
+    # size multipliers, tuned exit params, and the demoted-strategy set. Empty
+    # learning.db -> all defaults -> plan sizing unchanged from before.
+    learn: dict = {}
+    try:
+        from . import learning
+        learn = learning.plan_inputs()
+    except Exception:
+        pass
     return {
         "equity": eq, "posture": state.get("posture", "BALANCED"),
         "holdings": holdings,
         "risk_floor_amt": risk_floor,
+        "strategy_multiplier": learn.get("strategy_multiplier", {}),
+        "demoted": learn.get("demoted", {}),
+        "exit_params": learn.get("exit_params", {}),
         "max_symbol_notional": (eq * (at.effective_symbol_pct(eq) if at else 0.10))
                                or None,
         "max_order_notional": state["gw"].limits.max_order_notional,

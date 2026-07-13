@@ -27,19 +27,29 @@ RISK_PCT = {"SURVIVAL": 0.0075, "BALANCED": 0.015, "AGGRESSIVE": 0.025}
 ATR_STOP = 1.5          # stop = entry ∓ ATR_STOP × ATR
 R_MULTIPLE = 2.0        # target = R_MULTIPLE × the stop distance
 MAX_IDEAS = 8
+# learning-feedback bounds — clamped here (consumer) as well as in learning.py
+# (producer), so a malformed input can never widen sizing beyond these lines.
+MULT_LO, MULT_HI = 0.25, 1.5
+ATR_STOP_LO, ATR_STOP_HI = 1.0, 2.5
+R_MULT_LO, R_MULT_HI = 1.5, 3.0
+
+
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
 
 
 # ---------------------------------------------------------------- idea sizing
 def _size_idea(idea: dict, equity: float, risk_pct: float,
-               max_notional: float, sym_cap: float | None = None) -> dict:
+               max_notional: float, sym_cap: float | None = None,
+               atr_stop: float = ATR_STOP, r_multiple: float = R_MULTIPLE) -> dict:
     entry, atr = idea.get("entry"), idea.get("atr")
     long = idea["side"] in ("LONG", "buy")
     if not entry or not atr or atr <= 0 or not equity:
         idea.update(stop=None, target=None, qty=0.0, notional=0.0)
         return idea
-    stop = entry - ATR_STOP * atr if long else entry + ATR_STOP * atr
+    stop = entry - atr_stop * atr if long else entry + atr_stop * atr
     dist = abs(entry - stop)
-    target = entry + R_MULTIPLE * dist if long else entry - R_MULTIPLE * dist
+    target = entry + r_multiple * dist if long else entry - r_multiple * dist
     qty = (equity * risk_pct) / dist if dist else 0.0
     # clip (never skip) to BOTH caps: per-order notional and the auto-trader's
     # per-symbol exposure cap — otherwise low-vol names structurally size
@@ -52,7 +62,7 @@ def _size_idea(idea: dict, equity: float, risk_pct: float,
     notional = qty * entry
     idea.update(stop=round(stop, 4), target=round(target, 4),
                 qty=round(qty, 6), notional=round(notional, 2),
-                risk_amt=round(qty * dist, 2), rr=R_MULTIPLE)
+                risk_amt=round(qty * dist, 2), rr=r_multiple)
     return idea
 
 
@@ -150,6 +160,12 @@ def draft(data: dict) -> dict:
     # bought ONCE — a held name only re-trades as an explicit increase/decrease.
     holdings = data.get("holdings", {}) or {}
     holds = []                     # non-executable status (hold / trim / flip)
+    # LEARNING FEEDBACK (deterministic, from live outcomes): per-strategy size
+    # multiplier and tuned exit params, both re-clamped here so a bad input can
+    # never breach the bright lines. Empty inputs -> mult 1.0 and the module
+    # defaults -> sizing byte-identical to the pre-learning engine.
+    strat_mult = data.get("strategy_multiplier", {}) or {}
+    exit_params = data.get("exit_params", {}) or {}
 
     def add(sym, side, strategy, source, rationale, tier="", dsr=None,
             verified=False, rank=99):
@@ -162,6 +178,12 @@ def draft(data: dict) -> dict:
         if not px:
             return
         seen.add(sym)
+        rp = risk_pct * _clamp(strat_mult.get(strategy, 1.0), MULT_LO, MULT_HI)
+        ep = exit_params.get(strategy, {}) or {}
+        astop = (_clamp(ep["atr_stop"], ATR_STOP_LO, ATR_STOP_HI)
+                 if ep.get("atr_stop") else ATR_STOP)
+        rmult = (_clamp(ep["r_multiple"], R_MULT_LO, R_MULT_HI)
+                 if ep.get("r_multiple") else R_MULTIPLE)
         idea = _size_idea(
             {"symbol": sym, "side": side, "strategy": strategy, "source": source,
              "rationale": rationale, "tier": tier, "dsr": dsr,
@@ -171,7 +193,7 @@ def draft(data: dict) -> dict:
              # post-deliberation as a defined-risk expression of a passed idea.
              "asset_class": "Crypto" if "/" in sym else "Equity",
              "entry": round(px, 4), "atr": atr(sym)},
-            equity, risk_pct, maxN, sym_cap)
+            equity, rp, maxN, sym_cap, astop, rmult)
         _reconcile_holding(idea, holdings.get(sym), rank, holds)
         if idea is not None:
             ideas.append(idea)
@@ -238,9 +260,21 @@ def _risk_review(plan, data):
 
 def _validation_review(plan, data):
     rejects, notes = set(), []
+    demoted = data.get("demoted", {}) or {}
     for i, idea in enumerate(plan["ideas"]):
         if idea.get("kind") == "option_structure":
             continue                              # defined-risk structure, not half-sized
+        # LEARNING DRIFT: a strategy the learning pass demoted (live edge fell
+        # below its certified backtest) is treated EXACTLY like an unverified
+        # idea — de-verified and its DSR nulled so the existing auto-trader gate
+        # routes it to the INBOX, then half-sized below.
+        if idea.get("strategy") in demoted:
+            idea["verified"] = False
+            idea["dsr"] = None
+            idea["demoted"] = True
+            notes.append(f"{idea['symbol']}/{idea['strategy']}: DEMOTED by the "
+                         f"learning pass ({demoted[idea['strategy']]}) — treated "
+                         "as unverified")
         if not idea.get("verified"):
             notes.append(f"{idea['symbol']}/{idea['strategy']}: not DSR-verified "
                          "— HALF size, and the auto-trader will NOT touch it "
@@ -467,10 +501,36 @@ def _selftest():
     pt2 = draft(dict(tiny, equity=100.0))                  # $10/$100 = 10% -> 8%
     assert pt2["risk_pct"] == 0.08, pt2["risk_pct"]
 
+    # ---- learning feedback: per-strategy multiplier, exit-param override,
+    #      and demotion routing (empty inputs -> byte-identical sizing) ----
+    ldata = dict(data, max_order_notional=1_000_000)     # unbind the notional cap
+    aapl_base = next(i for i in draft(ldata)["ideas"] if i["symbol"] == "AAPL")
+    aapl_half = next(i for i in draft(dict(ldata, strategy_multiplier={
+        "roll_high_252": 0.5}))["ideas"] if i["symbol"] == "AAPL")
+    assert abs(aapl_half["risk_amt"] - aapl_base["risk_amt"] * 0.5) < 0.5, \
+        (aapl_half["risk_amt"], aapl_base["risk_amt"])
+    # out-of-bounds multiplier is CLAMPED at the consumer (never > 1.5x)
+    aapl_huge = next(i for i in draft(dict(ldata, strategy_multiplier={
+        "roll_high_252": 9.0}))["ideas"] if i["symbol"] == "AAPL")
+    assert aapl_huge["risk_amt"] <= aapl_base["risk_amt"] * 1.5 + 0.5, aapl_huge["risk_amt"]
+    # exit-param override reshapes stop/target geometry (clamped to bounds)
+    aapl_ep = next(i for i in draft(dict(ldata, exit_params={
+        "roll_high_252": {"atr_stop": 2.5, "r_multiple": 3.0}}))["ideas"]
+        if i["symbol"] == "AAPL")
+    assert aapl_ep["rr"] == 3.0 and abs((aapl_ep["entry"] - aapl_ep["stop"]) - 2.5 * 4.0) < 0.01
+    # demotion: a verified strategy the learning pass demoted is de-verified,
+    # DSR-nulled, half-sized and INBOX-routed — exactly like an unverified idea.
+    # Use the default-cap data so the leverage trim doesn't drop AAPL first.
+    dd = dict(data, demoted={"roll_high_252": "live edge drifted below backtest"})
+    ad = next(i for i in deliberate(draft(dd), dd)["ideas"] if i["symbol"] == "AAPL")
+    assert ad.get("demoted") and ad.get("half_size") and ad["verified"] is False \
+        and ad["dsr"] is None, ad
+
     print(f"tradeplan self-test ✓  drafted {len(plan['ideas'])} ideas w/ ATR "
           f"stops+2R targets, 4-agent deliberation, half-size on unverified, "
           f"persisted; portfolio-aware hold/increase/flip idempotency; "
-          f"small-account risk floor + no-crypto-short rule")
+          f"small-account risk floor + no-crypto-short rule; learning "
+          f"multiplier (clamped) + exit-param override + demotion routing")
 
 
 if __name__ == "__main__":

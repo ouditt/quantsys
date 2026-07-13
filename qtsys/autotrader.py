@@ -65,7 +65,12 @@ class AutoTrader:
                     "ALTER TABLE managed ADD COLUMN kind TEXT DEFAULT 'equity'",
                     "ALTER TABLE managed ADD COLUMN legs TEXT",
                     "ALTER TABLE managed ADD COLUMN expiration TEXT",
-                    "ALTER TABLE managed ADD COLUMN strategy TEXT"):
+                    "ALTER TABLE managed ADD COLUMN strategy TEXT",
+                    # learning capture: realised excursions + actual fill/slippage
+                    "ALTER TABLE managed ADD COLUMN mfe REAL",
+                    "ALTER TABLE managed ADD COLUMN mae REAL",
+                    "ALTER TABLE managed ADD COLUMN entry_fill REAL",
+                    "ALTER TABLE managed ADD COLUMN slippage_bps REAL"):
             try:                                   # migrate older databases
                 self.db.execute(mig)
             except Exception:
@@ -457,6 +462,7 @@ class AutoTrader:
                 continue
             if not px or px != px:
                 continue
+            self._capture_excursion(p, px)         # learning: MFE/MAE + slippage
             long = p["side"] == "buy"
             hit = ("target" if (px >= p["target"] if long else px <= p["target"])
                    else "stop" if (px <= p["stop"] if long else px >= p["stop"])
@@ -522,19 +528,80 @@ class AutoTrader:
                     "high")
         return True
 
+    def _capture_excursion(self, p: dict, px: float) -> None:
+        """Direction-aware MFE/MAE update for an open managed position, plus a
+        one-time resolution of the ACTUAL entry fill and its slippage vs the
+        planned entry. Learning (learning.py) reads these per strategy to tune
+        exits and score execution quality. One UPDATE per position per pass."""
+        mid = p.get("id")
+        if mid is None:
+            return
+        long = p["side"] == "buy"
+        try:
+            if long:                               # favourable = high, adverse = low
+                self.db.execute(
+                    "UPDATE managed SET mfe=MAX(COALESCE(mfe,entry),?), "
+                    "mae=MIN(COALESCE(mae,entry),?) WHERE id=? AND status='open'",
+                    (px, px, mid))
+            else:                                  # short: favourable = low
+                self.db.execute(
+                    "UPDATE managed SET mfe=MIN(COALESCE(mfe,entry),?), "
+                    "mae=MAX(COALESCE(mae,entry),?) WHERE id=? AND status='open'",
+                    (px, px, mid))
+            row = self.db.execute(
+                "SELECT order_id, entry FROM managed WHERE id=? AND "
+                "entry_fill IS NULL AND COALESCE(order_id,'')!=''", (mid,)).fetchone()
+            if row:
+                fill = self._resolve_fill(row[0])
+                planned = row[1]
+                if fill and planned:
+                    slip = ((fill - planned) if long else (planned - fill)) / planned * 1e4
+                    self.db.execute("UPDATE managed SET entry_fill=?, "
+                                    "slippage_bps=? WHERE id=?",
+                                    (fill, round(slip, 2), mid))
+            self.db.commit()
+        except Exception:
+            pass
+
+    def _resolve_fill(self, order_id: str) -> float | None:
+        """Best-effort actual average fill price for an order id, tolerant of the
+        different broker order shapes (object attrs or dict)."""
+        if not order_id:
+            return None
+        try:
+            geto = getattr(self.broker, "get_order", None)
+            if not geto:
+                return None
+            o = geto(order_id)
+            for attr in ("filled_avg_price", "avg_fill_price", "avg_price", "price"):
+                v = o.get(attr) if isinstance(o, dict) else getattr(o, attr, None)
+                if v:
+                    return float(v)
+        except Exception:
+            pass
+        return None
+
     def _journal(self, p: dict, exit_px, reason: str, realized):
         """Every auto-managed close becomes a REAL trade-journal entry, so the
         weekly review and the daily wrap reflect live trading (the journal was
-        previously never fed by live fills)."""
+        previously never fed by live fills). Carries the captured MFE/MAE and
+        actual-fill slippage so the learning pass can score exits/execution."""
         try:
             from .journal import Journal
             base = abs((p.get("entry") or 0) * (p.get("qty") or 0))
             net = (realized / base) if (realized is not None and base) else None
+            mfe = mae = slip = None
+            if p.get("id") is not None:
+                row = self.db.execute("SELECT mfe, mae, slippage_bps FROM managed "
+                                      "WHERE id=?", (p["id"],)).fetchone()
+                if row:
+                    mfe, mae, slip = row
             Journal().log(
                 setup_id=p.get("strategy") or "auto",
                 asset=p["symbol"], side=p["side"], signal_date=p.get("plan_date", ""),
                 regime_trend="AUTO", tier="",
                 entry_px=p.get("entry"), size_units=p.get("qty"),
+                slippage_bps_vs_plan=slip, mfe=mfe, mae=mae,
                 exit_px=exit_px, net_ret=net, exit_reason=reason,
                 loss_within_plan=str(reason in ("target", "stop", "expiry")),
                 breach_code="NONE",
@@ -591,6 +658,11 @@ def _selftest():
     # price below entry, above stop -> no exit
     at.broker.px["AAPL"] = 205.0
     assert at.monitor()["closed"] == 0
+    # learning capture: MFE/MAE track the best/worst excursion while open.
+    at.broker.px["AAPL"] = 198.0               # dips (still above the 194 stop)
+    assert at.monitor()["closed"] == 0
+    mrow = at.db.execute("SELECT mfe, mae FROM managed WHERE status='open'").fetchone()
+    assert mrow and mrow[0] == 205.0 and mrow[1] == 198.0, ("mfe/mae capture", mrow)
     # hit target -> close with positive realized
     at.broker.px["AAPL"] = 213.0
     assert at.monitor()["closed"] == 1 and not at.open_positions()

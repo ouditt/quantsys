@@ -231,6 +231,17 @@ class AgentDaemon:
                     self._save_report("daily_wrap", txt)
                     return "WRAP filed -> reports/; " + txt.splitlines()[1]
                 return "wrap: journal empty — no live/paper trades logged yet"
+            if agent.name == "Report Writer" and self._due("learning_report", 24):
+                # deterministic learning pass: score strategies vs their certified
+                # backtests, promote/demote on proven drift, tune exits from
+                # realised MFE/MAE, and grade the committee's critiques.
+                from . import learning
+                txt = learning.nightly_report()
+                self._save_report("learning_report", txt)
+                head = next((l.strip() for l in txt.splitlines()
+                             if l.strip().startswith(("DEMOTE", "PROMOTE", "RESTORE"))), None)
+                return ("LEARNING REPORT filed -> reports/"
+                        + (f"; {head}" if head else "; no strategy state changes"))
             if agent.name == "Ops Triage" and self._due("data_fresh", 6):
                 from .data import REAL_SOURCES, load_real
                 import pandas as pd

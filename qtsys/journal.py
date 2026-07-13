@@ -21,7 +21,7 @@ import pandas as pd
 HERE = os.path.dirname(__file__)
 FIELDS_BEFORE = ["setup_id", "asset", "side", "signal_date", "planned_risk_pct",
                  "planned_stop_frac", "regime_trend", "regime_vol", "scan_rank", "tier"]
-FIELDS_DURING = ["entry_px", "size_units", "slippage_bps_vs_plan"]
+FIELDS_DURING = ["entry_px", "size_units", "slippage_bps_vs_plan", "mfe", "mae"]
 FIELDS_AFTER = ["exit_px", "net_ret", "hold_bars", "exit_reason",
                 "loss_within_plan", "breach_code", "note"]
 BREACH_CODES = {"NONE": "no breach", "SIZE": "size differed from sizing.py output",
@@ -35,6 +35,11 @@ class Journal:
         self.db = sqlite3.connect(db_path or os.path.join(HERE, "journal.db"))
         cols = ", ".join(f"{c} TEXT" for c in FIELDS_BEFORE + FIELDS_DURING + FIELDS_AFTER)
         self.db.execute(f"CREATE TABLE IF NOT EXISTS trades (ts REAL, {cols})")
+        for col in ("mfe", "mae"):                 # migrate older journals
+            try:
+                self.db.execute(f"ALTER TABLE trades ADD COLUMN {col} TEXT")
+            except Exception:
+                pass
         self.db.commit()
 
     def log(self, **kw):
@@ -47,7 +52,8 @@ class Journal:
 
     def frame(self) -> pd.DataFrame:
         df = pd.read_sql("SELECT * FROM trades", self.db)
-        for c in ("net_ret", "planned_risk_pct", "hold_bars", "slippage_bps_vs_plan"):
+        for c in ("net_ret", "planned_risk_pct", "hold_bars", "slippage_bps_vs_plan",
+                  "mfe", "mae"):
             if c in df:
                 df[c] = pd.to_numeric(df[c], errors="coerce")
         return df

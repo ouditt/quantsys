@@ -10,6 +10,8 @@ venv/
 
 # runtime state (agent logs, posture kv) — regenerated on boot
 *.db
+*.db-wal
+*.db-shm
 
 # universe scan runtime data (bars cache, ML selector store/model)
 qtsys/universe_cache/
@@ -26,3 +28,10 @@ qtsys/day_baseline.json
 
 # runtime log
 server.log
+
+# private build/planning docs — not source-controlled
+BUILD-PLAN.md
+
+# new runtime state DBs introduced by the build plan (also matched by *.db)
+learning.db
+riskgov.db
