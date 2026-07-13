@@ -17,6 +17,7 @@ Run:  python -m qtsys.learning        (temp DBs + synthetic drifting strategy)
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 import time
@@ -239,6 +240,14 @@ def strategy_scorecard(journal_db: str | None = None,
             "confidence": conf}
         card["state"] = _drift_state(card)
         card["multiplier"] = size_multiplier(card)
+        # sanitize non-finite floats (a 1-trade strategy has infinite SE) so the
+        # card is JSON-serialisable — FastAPI's encoder rejects inf/nan. State
+        # and multiplier are already computed above using the numeric SE.
+        for k in ("expectancy", "expectancy_se", "win_rate", "confidence",
+                  "profit_factor", "avg_slippage_bps"):
+            v = card.get(k)
+            if isinstance(v, float) and not math.isfinite(v):
+                card[k] = None
         cards[sid] = card
     return cards
 
@@ -595,6 +604,18 @@ def _selftest():
     # 8) nightly_report runs end-to-end and mentions a state change
     txt = nightly_report(store, jpath, reg, atpath)
     assert "LEARNING REPORT" in txt and "drift_me" in txt
+
+    # 9) REGRESSION: a strategy with a single live trade has infinite SE; the
+    # scorecard MUST still be JSON-serialisable (FastAPI rejects inf/nan). This
+    # is the bug the live integration gate caught.
+    j.log(setup_id="one_shot", asset="ZZZ", side="buy", regime_trend="AUTO",
+          net_ret=0.02)
+    sc = strategy_scorecard(jpath, reg)
+    assert sc["one_shot"]["expectancy_se"] is None, "infinite SE sanitized to None"
+    json.dumps(sc, allow_nan=False)              # must not raise (mirrors FastAPI)
+    json.dumps({"scorecard": sc, "decisions": store.decisions(50),
+                "exit_params": store.exit_params(),
+                "agent_scores": store.agent_scores(50)}, allow_nan=False)
 
     store.db.close()
     import shutil

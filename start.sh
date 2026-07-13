@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Start the QTSYS terminal server. Loads broker keys from .env if present.
-# Portable: finds the venv next to the repo (./venv) or one level up
+# Portable: finds the venv next to the repo (.venv or ./venv) or one level up
 # (../venv, the original Linux layout), else falls back to python3.
 cd "$(dirname "$0")"
 if [ -f .env ]; then
     chmod 600 .env            # broker keys: owner-only, always
     set -a; source .env; set +a
 fi
-if [ -x "venv/bin/python" ]; then
+if [ -x ".venv/bin/python" ]; then
+    PY=".venv/bin/python"
+elif [ -x "venv/bin/python" ]; then
     PY="venv/bin/python"
 elif [ -x "../venv/bin/python" ]; then
     PY="../venv/bin/python"
