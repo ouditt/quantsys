@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  QTSYS terminal — macOS launchd LaunchDAEMON (system domain) for true 24/7
+  headless operation that survives reboot AND the ~/Documents TCC restriction.
+
+  Why a DAEMON, not an Agent: a LaunchAgent runs inside the user login session
+  and macOS blocks it from reading ~/Documents (TCC). A LaunchDaemon runs in the
+  system domain at BOOT (as UserName below, so it still uses your .env/venv), and
+  is NOT subject to that per-session Documents wall — the same pattern Tradesys
+  uses. The server keeps binding to 127.0.0.1; Tailscale is the only way in.
+
+  Install (see deploy/install-daemon.sh, or run these):
+    sudo cp deploy/com.qtsys.daemon.plist /Library/LaunchDaemons/com.qtsys.terminal.plist
+    sudo chown root:wheel /Library/LaunchDaemons/com.qtsys.terminal.plist
+    sudo chmod 644        /Library/LaunchDaemons/com.qtsys.terminal.plist
+    sudo launchctl bootstrap system /Library/LaunchDaemons/com.qtsys.terminal.plist
+    sudo launchctl enable   system/com.qtsys.terminal
+    sudo launchctl kickstart -k system/com.qtsys.terminal
+
+  Manage:
+    sudo launchctl print    system/com.qtsys.terminal | head   # status
+    sudo launchctl kickstart -k system/com.qtsys.terminal      # restart (apply code/.env)
+    sudo launchctl bootout  system/com.qtsys.terminal          # stop + unload
+
+  Logs: ~/Library/Logs/qtsys/gui.{out,err}.log
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.qtsys.terminal</string>
+
+  <key>UserName</key><string>me</string>
+  <key>GroupName</key><string>staff</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/me/Documents/quantsys/start.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key><string>/Users/me/Documents/quantsys</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>/Users/me</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>QTSYS_PORT</key><string>8011</string>
+    <!-- bind all interfaces so the Tailscale hostname reaches it from the iPad
+         (same as Tradesys TRADESYS_GUI_HOST=0.0.0.0); access is over the private
+         Tailscale mesh and mutations require the session token -->
+    <key>QTSYS_HOST</key><string>0.0.0.0</string>
+  </dict>
+
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>5</integer>
+
+  <key>StandardOutPath</key><string>/Users/me/Library/Logs/qtsys/gui.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/me/Library/Logs/qtsys/gui.err.log</string>
+</dict>
+</plist>

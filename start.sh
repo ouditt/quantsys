@@ -16,4 +16,9 @@ elif [ -x "../venv/bin/python" ]; then
 else
     PY="$(command -v python3)"
 fi
-exec "$PY" -m uvicorn qtsys.server:app --host 127.0.0.1 --port "${QTSYS_PORT:-8001}"
+# QTSYS_HOST controls the bind interface. Default 127.0.0.1 (localhost-only, the
+# safe dev default). Set QTSYS_HOST=0.0.0.0 to reach the terminal from your iPad
+# over Tailscale (the daemon sets this) — access is over the private Tailscale
+# mesh and every mutating call still requires the per-boot session token.
+exec "$PY" -m uvicorn qtsys.server:app \
+    --host "${QTSYS_HOST:-127.0.0.1}" --port "${QTSYS_PORT:-8001}"

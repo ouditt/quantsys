@@ -46,17 +46,31 @@ the PLAN page should show your existing plan and the paper-days counter.
 
 ## 3 · Auto-start + stay awake
 
+Use a **system LaunchDaemon**, not a LaunchAgent. A LaunchAgent runs inside your
+login session and macOS blocks it from reading `~/Documents` (TCC privacy) and it
+dies at logout. A LaunchDaemon starts at BOOT, before login, and — running in the
+system domain — reads the repo from `~/Documents` fine. (This is the same pattern
+the sibling Tradesys app uses.)
+
 ```bash
-# start at login, restart on crash (edit YOURUSER in the plist first)
-sed -i '' "s/YOURUSER/$USER/g" deploy/com.qtsys.terminal.plist
-cp deploy/com.qtsys.terminal.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.qtsys.terminal.plist
+# installs /Library/LaunchDaemons/com.qtsys.terminal.plist, binds :8011, starts it
+sudo bash deploy/install-daemon.sh
 
 # a trading box must not sleep
 sudo pmset -a sleep 0 disksleep 0
 ```
 
-Logs land in `/tmp/qtsys.out` / `/tmp/qtsys.err`.
+Manage it:
+
+```bash
+sudo launchctl print    system/com.qtsys.terminal | head   # status
+sudo launchctl kickstart -k system/com.qtsys.terminal      # restart (apply code/.env)
+sudo launchctl bootout  system/com.qtsys.terminal          # stop + unload
+```
+
+Logs land in `~/Library/Logs/qtsys/gui.{out,err}.log`. The daemon runs on port
+**8011** (8001 is often taken by an unrelated app) and binds `0.0.0.0` so the
+iPad can reach it over Tailscale (see §4).
 
 ## 4 · Tailscale (Mac mini + iPad)
 
@@ -64,30 +78,34 @@ Logs land in `/tmp/qtsys.out` / `/tmp/qtsys.err`.
    open it, sign in (Google/Apple/GitHub — this creates your private
    "tailnet"). In the Tailscale menu enable **MagicDNS + HTTPS certificates**
    (Admin console → DNS → enable HTTPS).
-2. Serve the terminal over the tailnet with a real HTTPS cert:
+2. The daemon already binds `0.0.0.0:8011` (via `QTSYS_HOST=0.0.0.0` in the
+   plist), so the mini is reachable at its Tailscale hostname — no `tailscale
+   serve` and no HTTPS-cert enablement needed. Find your URL:
 
    ```bash
-   tailscale serve --bg https / http://127.0.0.1:8001
-   tailscale serve status     # shows your URL, e.g.:
-   #  https://mac-mini.tail1234.ts.net
+   tailscale status --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))'
+   # e.g.  mouhameds-mac-mini.tail49851e.ts.net  ->  http://<that>:8011
    ```
 
 3. **iPad**: install the **Tailscale app** from the App Store, sign in with
    the SAME account, toggle the VPN on.
-4. Open Safari on the iPad → `https://mac-mini.tail1234.ts.net`. Everything
-   works — session token, live WebSocket quotes, order confirms, the PLAN
-   page — because Tailscale proxies to 127.0.0.1 on the mini. Use Safari's
-   **Share → Add to Home Screen** to get a full-screen app icon.
+4. Open Safari on the iPad → `http://<your-mini>.tailXXXX.ts.net:8011`.
+   Everything works — session token, live WebSocket quotes, order confirms,
+   the PLAN and PERF pages. Use Safari's **Share → Add to Home Screen** for a
+   full-screen app icon.
 
 Abroad = exactly the same: the iPad's Tailscale VPN reaches the mini over any
 network (hotel Wi-Fi, cellular), end-to-end encrypted via WireGuard. If the
 mini is behind CGNAT it still works (Tailscale relays via DERP).
 
-### Why this and not port-forwarding
-The server has a session token on mutations but no TLS and no login page.
-Tailscale gives you: WireGuard encryption, your-devices-only access, real
-HTTPS, and zero router configuration. Never bind the server to 0.0.0.0 and
-never forward port 8001 on a router.
+### Security posture
+The server binds `0.0.0.0` but access is intended over the private Tailscale
+mesh (WireGuard-encrypted, your-devices-only). Every mutating `/api` call
+requires the per-boot session token (injected into the served page only), so
+even a same-LAN peer cannot arm the engine, place an order, or fire the kill
+switch. Read-only endpoints (quotes/account/plan) are open on the LAN — if that
+matters on an untrusted network, set `QTSYS_HOST` back to `127.0.0.1` and use
+`tailscale serve` instead. Never forward port 8011 on a router.
 
 ## 5 · Day-2 notes
 
