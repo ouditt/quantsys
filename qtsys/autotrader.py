@@ -845,6 +845,18 @@ def _selftest():
     assert any(s[0] == "CC" and "cluster" in s[1].lower() for s in rc["skipped"]), \
         ("3rd correlated entry skipped", rc["skipped"])
 
+    # HALF-SIZE WHERE SAFE: a fractional long (risk-reduced / half-sized idea)
+    # executes as a partial position on a fractional-capable venue — the
+    # executor submits the float qty unchanged, no integer rounding.
+    ath = AutoTrader(_FakeGW(), _FakeBroker(), db_path=tempfile.mktemp(suffix=".db"))
+    ath.set_enabled(True)
+    hs = ath.execute_plan({"date": ath._today(), "ideas": [
+        {"symbol": "AAPL", "side": "LONG", "qty": 0.5, "entry": 200.0,
+         "stop": 194.0, "target": 212.0, "notional": 100.0, "verified": True,
+         "half_size": True}]})
+    assert hs["executed"] == 1 and abs(ath.open_positions()[0]["qty"] - 0.5) < 1e-9, \
+        ("fractional half-size long executes", hs)
+
     # risk-governor weekly-loss gate blocks entries via _blocked()
     class _GateGov:
         def entry_blocked(self):

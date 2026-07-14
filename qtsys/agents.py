@@ -34,6 +34,9 @@ ROSTER = [
     ("Arb Strategist", "pairs stat-arb scan + crypto triangular loop monitor", 90),
     ("Portfolio Manager", "drafts the daily plan, runs the desk deliberation, "
      "hands adopted trades to the auto-trader", 300),
+    ("Executor", "runs adopted trades through the gateway, manages TP/SL exits, "
+     "and adapts its own sizing & exits from live outcomes — improves the more "
+     "it trades", 60),
 ]
 
 # bundled non-equity symbols (commodity/FX/crypto/index) — no SEC CIK, so they
@@ -184,6 +187,42 @@ class AgentDaemon:
                     head += f"; auto-trader entered {res.get('executed', 0)}"
                 elif at:
                     head += "; auto-trader DISARMED (plan is on the PLAN page)"
+                return head
+            if agent.name == "Executor":
+                # The execution engine given a face: reports what it is managing
+                # AND how it is adapting from its own live outcomes (the learning
+                # loop) — this is the "improves the more it trades" surface. TP/SL
+                # monitoring itself is owned by the 30s _autotrader_loop; this
+                # agent never double-executes.
+                at = getattr(self, "autotrader", None)
+                if not at:
+                    return "executor: engine not wired"
+                st = at.status()
+                head = (f"EXECUTOR: {st['open']}/{st['max_concurrent']} managed, "
+                        f"{st['orders_today']}/{st['max_orders_day']} orders today, "
+                        f"realized {st['realized_today']:+.2f} "
+                        + ("· ARMED" if st['enabled'] else "· disarmed")
+                        + (f" · {st['paper_days']}/{st['paper_days_req']} paper days"
+                           if not st['live_ok'] else " · LIVE-eligible"))
+                if self._due("exec_learning", 6):   # 2×/day: the adaptation summary
+                    try:
+                        from . import learning
+                        pin = learning.plan_inputs()
+                        ups = {k: v for k, v in pin.get("strategy_multiplier", {}).items() if v > 1.0}
+                        downs = pin.get("demoted", {})
+                        tuned = pin.get("exit_params", {})
+                        adapt = []
+                        if ups:
+                            adapt.append(f"sizing UP {len(ups)} proven")
+                        if downs:
+                            adapt.append(f"half-sizing {len(downs)} demoted")
+                        if tuned:
+                            adapt.append(f"exit-tuned {len(tuned)}")
+                        head += (" · adapting: " + ", ".join(adapt) if adapt
+                                 else " · building a track record (no size/exit "
+                                 "adjustments earned yet)")
+                    except Exception:
+                        pass
                 return head
             if agent.name == "Microstructure Analyst" and self.l2lab:
                 # 180-day one-shot upgrade decision (date-gated + one-shot inside lab)

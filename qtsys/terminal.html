@@ -2962,9 +2962,22 @@
       }
       const eq = pts.map(p => p.equity);
       const mn = Math.min(...eq), mx = Math.max(...eq), sp = (mx - mn) || 1;
-      const X = i => i / (pts.length - 1) * (w - 4) + 2;
-      const Y = v => h - 4 - ((v - mn) / sp) * (h - 12);
+      // gutters: left for $ axis labels, bottom for the time axis
+      const padL = 58, padB = 16, padT = 6, padR = 6;
+      const plotW = w - padL - padR, plotH = h - padT - padB;
+      const X = i => padL + i / (pts.length - 1) * plotW;
+      const Y = v => padT + plotH - ((v - mn) / sp) * plotH;
       let peak = -Infinity; const pk = eq.map(v => (peak = Math.max(peak, v)));
+      const abbr = v => Math.abs(v) >= 1000 ? "$" + (v / 1000).toFixed(v >= 100000 ? 0 : 1) + "k" : "$" + v.toFixed(0);
+      const tlabel = ts => { const d = new Date(ts * 1000); return (d.getMonth() + 1) + "/" + d.getDate() + " " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); };
+      // horizontal gridlines + Y-axis $ labels (max / mid / min)
+      x.font = "10px monospace"; x.textBaseline = "middle";
+      [mx, (mx + mn) / 2, mn].forEach(v => {
+        const y = Y(v);
+        x.strokeStyle = "#1c2531"; x.lineWidth = 1;
+        x.beginPath(); x.moveTo(padL, y); x.lineTo(w - padR, y); x.stroke();
+        x.fillStyle = "#77839a"; x.textAlign = "right"; x.fillText(abbr(v), padL - 6, y);
+      });
       // drawdown band (between equity and its running peak)
       x.beginPath(); x.moveTo(X(0), Y(pk[0]));
       for (let i = 1; i < pts.length; i++) x.lineTo(X(i), Y(pk[i]));
@@ -2974,8 +2987,21 @@
       x.beginPath(); pk.forEach((v, i) => i ? x.lineTo(X(i), Y(v)) : x.moveTo(X(i), Y(v)));
       x.strokeStyle = "#ffb200"; x.lineWidth = 1; x.setLineDash([3, 3]); x.stroke(); x.setLineDash([]);
       // equity line
+      const rising = eq.at(-1) >= eq[0];
       x.beginPath(); eq.forEach((v, i) => i ? x.lineTo(X(i), Y(v)) : x.moveTo(X(i), Y(v)));
-      x.strokeStyle = eq.at(-1) >= eq[0] ? "#27d17f" : "#ff5063"; x.lineWidth = 1.6; x.stroke();
+      x.strokeStyle = rising ? "#27d17f" : "#ff5063"; x.lineWidth = 1.6; x.stroke();
+      // current-value marker + label at the right end
+      const lx = X(pts.length - 1), ly = Y(eq.at(-1));
+      x.fillStyle = rising ? "#27d17f" : "#ff5063";
+      x.beginPath(); x.arc(lx, ly, 2.5, 0, 7); x.fill();
+      x.textAlign = "right"; x.textBaseline = "bottom";
+      x.fillText(abbr(eq.at(-1)), lx - 4, ly - 3);
+      // X-axis time labels (first / last), + peak legend
+      x.fillStyle = "#77839a"; x.textBaseline = "top";
+      x.textAlign = "left"; x.fillText(tlabel(pts[0].ts), padL, h - padB + 3);
+      x.textAlign = "right"; x.fillText(tlabel(pts.at(-1).ts), w - padR, h - padB + 3);
+      x.textAlign = "left"; x.fillStyle = "#ffb200";
+      x.fillText("— peak " + abbr(peak), padL + 74, h - padB + 3);
     }
     function vPerf() {
       const rg = S.riskgov, ln = S.learning;
