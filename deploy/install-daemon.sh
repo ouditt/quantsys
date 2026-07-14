@@ -17,8 +17,10 @@ fi
 # log dir (daemon runs as user 'me' and writes here)
 install -d -o me -g staff "/Users/me/Library/Logs/qtsys"
 
-# free the port: stop any manually-started uvicorn before the daemon binds :8011
+# free the port: stop any manually-started server before the daemon binds :8011
+# (covers both `start.sh` -> "uvicorn qtsys.server" and `run.py` launchers)
 pkill -f "uvicorn qtsys.server" 2>/dev/null || true
+pkill -f "quantsys/run.py" 2>/dev/null || true
 sleep 1
 
 # (re)install the plist

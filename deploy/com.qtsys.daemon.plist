@@ -33,10 +33,14 @@
   <key>UserName</key><string>me</string>
   <key>GroupName</key><string>staff</string>
 
+  <!-- Invoke the venv python DIRECTLY (not bash): that binary resolves to the
+       framework python that holds the ~/Documents TCC grant, so the daemon can
+       read the repo. run.py loads .env in-process. /bin/bash is NOT granted and
+       macOS blocks it from ~/Documents. -->
   <key>ProgramArguments</key>
   <array>
-    <string>/bin/bash</string>
-    <string>/Users/me/Documents/quantsys/start.sh</string>
+    <string>/Users/me/Documents/quantsys/.venv/bin/python</string>
+    <string>/Users/me/Documents/quantsys/run.py</string>
   </array>
 
   <key>WorkingDirectory</key><string>/Users/me/Documents/quantsys</string>
